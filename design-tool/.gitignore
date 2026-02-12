@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+
+# Virtualenv
+.venv/
+venv/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Exports / outputs
+exports/
+
+# Logs
+*.log
+
+# CAD/graphics temp
+*.stl
+*.step
+*.stp
+*.obj
+*.ply
+*.svg
+*.pdf
+*.png
