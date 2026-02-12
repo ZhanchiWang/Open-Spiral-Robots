@@ -1,4 +1,4 @@
-# SpiRobs Workshop
+# SpiRobs Design Tool
 
 A GUI tool for designing logarithmic-spiral soft robots (2‑cable / 3‑cable), exporting CAD (STEP/STL) and MuJoCo XML models.
 
