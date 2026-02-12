@@ -14,6 +14,10 @@ If you use OpenSpiRobs in academic work, please cite this repository:
 }
 ```
 
+## Contact
+- Email: zhanchi@ustc.edu.cn
+- WeChat: spirobs
+
 ## Structure
 - `design-tool/` — Python GUI design tool (primary)
 - `hardware/` — hardware CAD/STEP/STL (optional)
