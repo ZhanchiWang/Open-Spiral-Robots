@@ -69,23 +69,11 @@ Check the newest folder under `exports/` contains:
 - STEP/STL file(s)
 
 ## 2) Screenshots
-Add images to `docs/images/` and update the paths below.
 
-```
-- docs/images/main-ui.png
-- docs/images/2d-sketch.png
-- docs/images/3d-model.png
-- docs/images/params-panel.png
-```
-
-Example usage in Markdown:
-
-```markdown
 ![Main UI](docs/images/main-ui.png)
 ![2D Sketch](docs/images/2d-sketch.png)
 ![3D Model](docs/images/3d-model.png)
 ![Parameters Panel](docs/images/params-panel.png)
-```
 
 ---
 
