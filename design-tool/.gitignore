@@ -30,3 +30,7 @@ exports/
 *.svg
 *.pdf
 *.png
+# Allow docs images
+!docs/
+!docs/images/
+!docs/images/*.png
