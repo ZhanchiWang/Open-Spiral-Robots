@@ -1,6 +1,10 @@
-# SpiRobs Design Tool
+# SpiRobs Workshop
 
 A GUI tool for designing logarithmic-spiral soft robots (2‑cable / 3‑cable), exporting CAD (STEP/STL) and MuJoCo XML models.
+
+## License
+- SPDX: PolyForm-Noncommercial-1.0.0
+- Commercial use requires a separate license.
 
 ## Requirements
 - Python 3.10+ (recommended)
