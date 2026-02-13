@@ -328,7 +328,7 @@ def _extrude(polydata: vtkPolyData, thickness: float) -> vtkPolyData:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("SpiRobs Workshop")
+        self.setWindowTitle("SpiRobs Design Tool")
         self.params = Params()
         self._polys_primary: List[List[Point2D]] = []
         self._polys_mirror: List[List[Point2D]] = []
@@ -1479,7 +1479,7 @@ class MainWindow(QMainWindow):
         turns: float,
     ) -> None:
         ax.clear()
-        ax.set_title("OpenSpiRob Design (Polar)")
+        ax.set_title("SpiRobs Design")
 
         ax.plot(theta_vals, r_vals, color="#1f77b4", linewidth=2.0)
         rc_end = max(0.0, 2.0 * math.pi * turns - 2.0 * math.pi)
