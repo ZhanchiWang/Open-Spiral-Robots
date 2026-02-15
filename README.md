@@ -21,6 +21,7 @@ If you use OpenSpiRobs in academic work, please cite this repository:
 ## Contact
 - Email: zhanchi@ustc.edu.cn
 - WeChat: spirobs
+- Please add the WeChat ID above to join the OpenSpiRobs WeChat group.
 
 ## Structure
 - `design-tool/` — Python GUI design tool (primary)
