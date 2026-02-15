@@ -1187,7 +1187,13 @@ class MainWindow(QMainWindow):
         self._ensure_vtk_ready()
         if not self._vtk_initialized:
             return
-        solid = self._build_cad_solid()
+        parts = self._build_cad_parts()
+        if parts is None:
+            return
+        main_solid, elastic_solid = parts
+        if main_solid is None:
+            return
+        solid = main_solid if elastic_solid is None else main_solid.union(elastic_solid)
         if solid is None:
             self.vtk_placeholder.setText("3D Preview unavailable (CadQuery not ready)")
             self.vtk_placeholder.setVisible(True)
@@ -1856,18 +1862,26 @@ class MainWindow(QMainWindow):
             import cadquery as cq
         except Exception:
             return
-        solid = self._build_cad_solid()
-        if solid is None:
+        parts = self._build_cad_parts()
+        if parts is None:
+            return
+        main_solid, elastic_solid = parts
+        if main_solid is None:
             return
         out_dir = os.path.join(os.getcwd(), "exports")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         step_path = os.path.join(out_dir, f"spi_rob_{ts}.step")
         stl_path = os.path.join(out_dir, f"spi_rob_{ts}.stl")
-        cq.exporters.export(solid.val(), step_path)
-        cq.exporters.export(solid.val(), stl_path)
+        solids = [main_solid.val()]
+        if elastic_solid is not None:
+            solids.append(elastic_solid.val())
+        step_compound = cq.Compound.makeCompound(solids)
+        cq.exporters.export(step_compound, step_path)
+        merged = main_solid if elastic_solid is None else main_solid.union(elastic_solid)
+        cq.exporters.export(merged.val(), stl_path)
 
-    def _build_cad_solid(self):
+    def _build_cad_parts(self):
         try:
             import cadquery as cq
         except Exception:
@@ -1876,17 +1890,19 @@ class MainWindow(QMainWindow):
         if self.params.two_cable:
             thickness = max(0.1, float(self.extrusion_spin.value()))
 
-            solid = None
+            main = None
             for poly in (self._polys_primary + self._polys_mirror):
                 wp = cq.Workplane("XY").polyline(poly).close().extrude(thickness / 2.0, both=True)
-                solid = wp if solid is None else solid.union(wp)
+                main = wp if main is None else main.union(wp)
+
+            elastic = None
             if self._elastic_poly:
                 wp = cq.Workplane("XY").polyline(self._elastic_poly).close().extrude(thickness / 2.0, both=True)
-                solid = wp if solid is None else solid.union(wp)
+                elastic = wp if elastic is None else elastic.union(wp)
             if self._elastic_poly_mirror:
                 wp = cq.Workplane("XY").polyline(self._elastic_poly_mirror).close().extrude(thickness / 2.0, both=True)
-                solid = wp if solid is None else solid.union(wp)
-            if solid is None:
+                elastic = wp if elastic is None else elastic.union(wp)
+            if main is None:
                 return None
             # Apply cone1 clipping to CAD export
             cone1 = float(self.cone1_spin.value())
@@ -1894,7 +1910,7 @@ class MainWindow(QMainWindow):
                 alpha = -math.radians(cone1 * 0.5)
                 # Use actual model bounds for base_x to avoid offset errors
                 try:
-                    base_x = solid.val().BoundingBox().xmax
+                    base_x = main.val().BoundingBox().xmax
                 except Exception:
                     base_x = self._robot_length
                 half_z = thickness * 0.5
@@ -1916,8 +1932,11 @@ class MainWindow(QMainWindow):
                     ))
                     return workpiece.cut(box)
 
-                solid = _cut_halfspace(solid, (base_x, 0.0, half_z), n1)
-                solid = _cut_halfspace(solid, (base_x, 0.0, -half_z), n2)
+                main = _cut_halfspace(main, (base_x, 0.0, half_z), n1)
+                main = _cut_halfspace(main, (base_x, 0.0, -half_z), n2)
+                if elastic is not None:
+                    elastic = _cut_halfspace(elastic, (base_x, 0.0, half_z), n1)
+                    elastic = _cut_halfspace(elastic, (base_x, 0.0, -half_z), n2)
 
             frustum = self._build_frustum_solid()
             if frustum is not None:
@@ -1927,13 +1946,17 @@ class MainWindow(QMainWindow):
                     inst = frustum if ang == 0.0 else frustum.rotate((0, 0, 0), (1, 0, 0), ang)
                     holes = inst if holes is None else holes.union(inst)
                 if holes is not None:
-                    solid = solid.cut(holes)
+                    main = main.cut(holes)
+                    if elastic is not None:
+                        elastic = elastic.cut(holes)
 
             cone2_solid = self._build_cone2_preview_solid()
             if cone2_solid is not None:
-                solid = solid.cut(cone2_solid)
+                main = main.cut(cone2_solid)
+                if elastic is not None:
+                    elastic = elastic.cut(cone2_solid)
 
-            return solid
+            return (main, elastic)
 
         solid = None
         for poly in self._polys_primary:
@@ -1961,7 +1984,7 @@ class MainWindow(QMainWindow):
                 holes = inst if holes is None else holes.union(inst)
             if holes is not None:
                 solid = solid.cut(holes)
-        return solid
+        return (solid, None)
 
 
 def main() -> None:
