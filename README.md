@@ -2,6 +2,8 @@
 
 OpenSpiRobs is a research toolkit for designing and simulating logarithmic‑spiral soft robots. It provides a GUI design tool for rapid geometry iteration, CAD export (STEP/STL), and MuJoCo XML generation, with optional modules for fabrication and datasets.
 
+![Main UI](design-tool/docs/images/main-ui.png)
+
 ## License
 - SPDX: PolyForm-Noncommercial-1.0.0
 - Commercial use requires a separate license.
