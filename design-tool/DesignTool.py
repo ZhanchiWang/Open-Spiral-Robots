@@ -1199,7 +1199,7 @@ class MainWindow(QMainWindow):
             self.vtk_placeholder.setVisible(True)
             return
 
-        out_dir = os.path.join(os.getcwd(), "exports")
+        out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
         preview_path = os.path.join(out_dir, "preview_live.stl")
         try:
@@ -1597,7 +1597,7 @@ class MainWindow(QMainWindow):
         ax.grid(True, alpha=0.2)
 
     def save_image(self) -> None:
-        out_dir = os.path.join(os.getcwd(), "exports")
+        out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         polar_path = os.path.join(out_dir, f"polar_{ts}.png")
@@ -1712,7 +1712,7 @@ class MainWindow(QMainWindow):
             import cadquery as cq
         except Exception:
             return
-        out_dir = os.path.join(os.getcwd(), "exports")
+        out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         xml_dir = os.path.join(out_dir, f"xml_{ts}")
@@ -1868,7 +1868,7 @@ class MainWindow(QMainWindow):
         main_solid, elastic_solid = parts
         if main_solid is None:
             return
-        out_dir = os.path.join(os.getcwd(), "exports")
+        out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         step_path = os.path.join(out_dir, f"spi_rob_{ts}.step")
