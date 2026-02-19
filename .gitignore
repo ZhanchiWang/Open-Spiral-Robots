@@ -1,3 +1,4 @@
 # local task tracking (not committed)
 local/
-\nextensions/multi-robot-array/output/
+extensions/multi-robot-array/output/
+__pycache__/

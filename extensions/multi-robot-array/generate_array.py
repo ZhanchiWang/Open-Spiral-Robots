@@ -52,6 +52,12 @@ def _rotation_quat_x(deg: float) -> str:
     s = math.sin(rad / 2.0)
     return f"{c:.9f} {s:.9f} 0 0"
 
+def _rotation_quat_y(deg: float) -> str:
+    rad = math.radians(deg)
+    c = math.cos(rad / 2.0)
+    s = math.sin(rad / 2.0)
+    return f"{c:.9f} 0 {s:.9f} 0"
+
 def _quat_mul(q1: str, q2: str) -> str:
     w1, x1, y1, z1 = (float(v) for v in q1.split())
     w2, x2, y2, z2 = (float(v) for v in q2.split())
@@ -61,10 +67,12 @@ def _quat_mul(q1: str, q2: str) -> str:
     z = w1*z2 + x1*y2 - y1*x2 + z1*w2
     return f"{w:.9f} {x:.9f} {y:.9f} {z:.9f}"
 
-    rad = math.radians(deg)
-    c = math.cos(rad / 2.0)
-    s = math.sin(rad / 2.0)
-    return f"{c:.9f} 0 0 {s:.9f}"
+def _rotation_quat_xyz(x_deg: float, y_deg: float, z_deg: float) -> str:
+    # Apply X then Y then Z rotations (intrinsic XYZ).
+    qx = _rotation_quat_x(x_deg)
+    qy = _rotation_quat_y(y_deg)
+    qz = _rotation_quat_z(z_deg)
+    return _quat_mul(_quat_mul(qz, qy), qx)
 
 
 def _rotate_xy(x: float, y: float, deg: float) -> tuple[float, float]:
@@ -81,6 +89,12 @@ def build_array(
     count: int,
     base_rot_deg: float,
     tilt_x_deg: float,
+    translate_x_mm: float = 0.0,
+    translate_y_mm: float = 0.0,
+    translate_z_mm: float = 0.0,
+    rotate_x_deg: float = 0.0,
+    rotate_y_deg: float = 0.0,
+    rotate_z_deg: float = 0.0,
 ) -> None:
     tree = ET.parse(input_xml)
     root = tree.getroot()
@@ -196,6 +210,20 @@ def build_array(
                 _prefix_names(a_clone, prefix)
                 new_actuator.append(a_clone)
 
+    tx = translate_x_mm * 0.001
+    ty = translate_y_mm * 0.001
+    tz = translate_z_mm * 0.001
+    if any(abs(v) > 1e-9 for v in (tx, ty, tz, rotate_x_deg, rotate_y_deg, rotate_z_deg)):
+        root_quat = _rotation_quat_xyz(rotate_x_deg, rotate_y_deg, rotate_z_deg)
+        array_root = ET.Element("body")
+        array_root.set("name", "array_root")
+        array_root.set("pos", f"{tx:.9f} {ty:.9f} {tz:.9f}")
+        array_root.set("quat", root_quat)
+        if new_worldbody is not None:
+            new_worldbody.remove(base_tree)
+            array_root.append(base_tree)
+            new_worldbody.append(array_root)
+
     output_xml.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(new_root).write(output_xml, encoding="utf-8", xml_declaration=True)
 
@@ -215,12 +243,31 @@ def main() -> None:
                         help="Array rotation offset around Z (deg)")
     parser.add_argument("--tilt-x-deg", type=float, default=-30,
                         help="Local X-axis tilt after placement (deg)")
+    parser.add_argument("--translate-x-mm", type=float, default=0.0, help="Global X translation (mm)")
+    parser.add_argument("--translate-y-mm", type=float, default=0.0, help="Global Y translation (mm)")
+    parser.add_argument("--translate-z-mm", type=float, default=0.0, help="Global Z translation (mm)")
+    parser.add_argument("--rotate-x-deg", type=float, default=0.0, help="Global X rotation (deg)")
+    parser.add_argument("--rotate-y-deg", type=float, default=0.0, help="Global Y rotation (deg)")
+    parser.add_argument("--rotate-z-deg", type=float, default=0.0, help="Global Z rotation (deg)")
 
     args = parser.parse_args()
     if not args.input:
         raise SystemExit("No input XML found. Use --input to specify robot.xml")
 
-    build_array(Path(args.input), Path(args.output), args.offset_y_mm, args.count, args.base_rot_deg, args.tilt_x_deg)
+    build_array(
+        Path(args.input),
+        Path(args.output),
+        args.offset_y_mm,
+        args.count,
+        args.base_rot_deg,
+        args.tilt_x_deg,
+        args.translate_x_mm,
+        args.translate_y_mm,
+        args.translate_z_mm,
+        args.rotate_x_deg,
+        args.rotate_y_deg,
+        args.rotate_z_deg,
+    )
     print(f"Wrote: {args.output}")
 
 
