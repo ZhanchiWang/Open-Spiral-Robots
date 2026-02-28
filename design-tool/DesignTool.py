@@ -1958,7 +1958,7 @@ class MainWindow(QMainWindow):
 
             return (main, elastic)
 
-        solid = None
+        main = None
         for poly in self._polys_primary:
             wp = (
                 cq.Workplane("XY")
@@ -1966,7 +1966,9 @@ class MainWindow(QMainWindow):
                 .close()
                 .revolve(360, (0, 0, 0), (1, 0, 0))
             )
-            solid = wp if solid is None else solid.union(wp)
+            main = wp if main is None else main.union(wp)
+
+        elastic = None
         if self._elastic_poly:
             wp = (
                 cq.Workplane("XY")
@@ -1974,7 +1976,11 @@ class MainWindow(QMainWindow):
                 .close()
                 .revolve(360, (0, 0, 0), (1, 0, 0))
             )
-            solid = wp if solid is None else solid.union(wp)
+            elastic = wp if elastic is None else elastic.union(wp)
+
+        if main is None:
+            return None
+
         frustum = self._build_frustum_solid()
         if frustum is not None:
             angles = [0.0, 120.0, 240.0]
@@ -1983,8 +1989,11 @@ class MainWindow(QMainWindow):
                 inst = frustum if ang == 0.0 else frustum.rotate((0, 0, 0), (1, 0, 0), ang)
                 holes = inst if holes is None else holes.union(inst)
             if holes is not None:
-                solid = solid.cut(holes)
-        return (solid, None)
+                main = main.cut(holes)
+                if elastic is not None:
+                    elastic = elastic.cut(holes)
+
+        return (main, elastic)
 
 
 def main() -> None:
