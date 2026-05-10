@@ -7,7 +7,9 @@ A GUI tool for designing logarithmic-spiral soft robots (2‑cable / 3‑cable),
 - Commercial use requires a separate license.
 
 ## Requirements
-- Python 3.10+ (recommended)
+- Python 3.10+ 
+- Tested on Python 3.10 and 3.11
+- Python 3.13 requires the newer `vtk` wheel selected by `requirements.txt`
 - See `requirements.txt`
 
 Install dependencies:
