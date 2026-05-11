@@ -481,7 +481,7 @@ class MainWindow(QMainWindow):
             form_2d, row, "p", "", 0.0, 0.5, 0.01, 2, self.params.p, scale=100
         )
 
-        label_2d = QLabel("2D Parameters")
+        label_2d = QLabel("Spiral and section Parameters")
         label_2d.setStyleSheet("font-weight:600; color:#666;")
         panel_layout.addWidget(label_2d)
         panel_layout.addLayout(form_2d)
@@ -489,7 +489,7 @@ class MainWindow(QMainWindow):
         self.save_img_btn = QPushButton("Save 2D Sketch")
         panel_layout.addWidget(self.save_img_btn)
 
-        label_holes = QLabel("Fabrication Parameters")
+        label_holes = QLabel("Elastic Core Parameters")
         label_holes.setStyleSheet("font-weight:600; color:#666;")
         panel_layout.addWidget(label_holes)
         form_3d = QGridLayout()
@@ -501,7 +501,7 @@ class MainWindow(QMainWindow):
         elastic_row.setContentsMargins(0, 0, 0, 0)
         elastic_row.setSpacing(8)
         self.elastic_check = ToggleSwitch(self.params.elastic_enabled)
-        elastic_label = QLabel("Elastic Layer/Axis")
+        elastic_label = QLabel("Enable elastic core")
         elastic_row.addWidget(self.elastic_check)
         elastic_row.addWidget(elastic_label)
         elastic_row.addStretch(1)
@@ -511,8 +511,13 @@ class MainWindow(QMainWindow):
         row += 1
 
         self.elastic_spin, self.elastic_slider, row = self._add_double_control(
-            form_3d, row, "Elastic", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10
+            form_3d, row, "Elastic core size", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10
         )
+
+        label_tendon_params = QLabel("Tendon Routing Parameters")
+        label_tendon_params.setStyleSheet("font-weight:600; color:#666;")
+        form_3d.addWidget(label_tendon_params, row, 0, 1, 3)
+        row += 1
 
         self.tip_hole_pos_spin, self.tip_hole_pos_slider, row = self._add_double_control(
             form_3d,
@@ -566,6 +571,18 @@ class MainWindow(QMainWindow):
         cable_row = QHBoxLayout()
         cable_row.setContentsMargins(0, 0, 0, 0)
         cable_row.setSpacing(8)
+
+        label_mode = QLabel("DOF Mode")
+        label_mode.setStyleSheet("""
+            font-weight:600;
+            color:#666;
+            padding-top:6px;
+            padding-bottom:2px;
+        """)
+
+        form_3d.addWidget(label_mode, row, 0, 1, 3)
+        row += 1
+
         self.cable_mode_title = QLabel("Num of Cables")
         self.cable2_check = QCheckBox("2")
         self.cable3_check = QCheckBox("3")
