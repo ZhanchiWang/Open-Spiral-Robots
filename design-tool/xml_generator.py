@@ -15,6 +15,8 @@ def generate_mujoco_xml(
     robot_length: float | None = None,
     site_points: tuple[float, float, float, float] | None = None,
     cable_mode: int = 2,
+    joint_stiffness: float = 0.04,
+    joint_damping: float = 0.02,
 ) -> None:
     """Generate a MuJoCo XML chain using a single STL mesh."""
     output_path = Path(output_path)
@@ -113,8 +115,8 @@ def generate_mujoco_xml(
     for site in build_sites(1.0, 1):
         lines.append(f'      {site}')
 
-    joint_stiffness = 0.04
-    joint_damping = 0.02
+    joint_stiffness = float(joint_stiffness)
+    joint_damping = float(joint_damping)
     for i in range(1, num_units):
         z_offset = unit_height * current_scale * unit_scale
         link_idx = i + 1

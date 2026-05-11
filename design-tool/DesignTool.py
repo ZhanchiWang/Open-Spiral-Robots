@@ -702,8 +702,8 @@ class MainWindow(QMainWindow):
             "Stiffness",
             "",
             0.0,
-            1.0,
-            0.01,
+            100.0,
+            0.1,
             3,
             self.params.sim_stiffness,
             scale=10,
@@ -714,8 +714,8 @@ class MainWindow(QMainWindow):
             "Damping",
             "",
             0.0,
-            1.0,
-            0.01,
+            100.0,
+            0.1,
             3,
             self.params.sim_damping,
             scale=10,
@@ -825,7 +825,7 @@ class MainWindow(QMainWindow):
             w.valueChanged.connect(self.schedule_update)
         self.elastic_check.toggled.connect(lambda _v: self.schedule_update())
 
-        self.update_2d()
+        self._apply_default_parameters(update_scene=False)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -947,6 +947,7 @@ class MainWindow(QMainWindow):
         box.setRange(vmin, vmax)
         box.setDecimals(decimals)
         box.setSingleStep(step)
+        box.setKeyboardTracking(False)
         box.setValue(value)
         box.setFixedWidth(self._param_spin_width)
 
@@ -983,6 +984,7 @@ class MainWindow(QMainWindow):
     ) -> Tuple[QSpinBox, QSlider, int]:
         box = QSpinBox()
         box.setRange(vmin, vmax)
+        box.setKeyboardTracking(False)
         box.setValue(value)
         box.setFixedWidth(self._param_spin_width)
 
@@ -1008,7 +1010,7 @@ class MainWindow(QMainWindow):
         return box, slider, row + 1
 
         
-    def reset_parameters(self) -> None:
+    def _apply_default_parameters(self, update_scene: bool = True) -> None:
         if hasattr(self, "_cone1_initialized"):
             delattr(self, "_cone1_initialized")
         if hasattr(self, "_cone2_initialized"):
@@ -1047,7 +1049,11 @@ class MainWindow(QMainWindow):
         self.cone1_spin.setValue(defaults.cone_angle1)
         self.cone1_slider.setValue(int(defaults.cone_angle1 * 10))
         self.update_2d()
-        self.update_scene()
+        if update_scene:
+            self.update_scene()
+
+    def reset_parameters(self) -> None:
+        self._apply_default_parameters(update_scene=True)
 
     def update_2d(self) -> None:
         self.params.a = float(self.a_spin.value())
@@ -1064,6 +1070,8 @@ class MainWindow(QMainWindow):
         self.params.cable3_cut_enabled = self.cable3_cut_check.isChecked()
         self.params.cable3_cut_pos = float(self.cable3_cut_pos_spin.value())
         self.params.cable3_cut_size = float(self.cable3_cut_size_spin.value())
+        self.params.sim_stiffness = float(self.sim_stiffness_spin.value())
+        self.params.sim_damping = float(self.sim_damping_spin.value())
 
         turns = max(0.1, self.params.theta_max_pi / 2.0)
         theta_vals, r_vals, rc_vals, units_primary, units_mirror, unit_count = _build_polar_units(
@@ -1104,9 +1112,11 @@ class MainWindow(QMainWindow):
         self.extrusion_slider.blockSignals(True)
         self.extrusion_spin.setRange(min_extrusion, max_extrusion)
         self.extrusion_slider.setRange(int(min_extrusion * 10), int(max_extrusion * 10))
-        current_extrusion = default_extrusion
-        if current_extrusion < min_extrusion or current_extrusion > max_extrusion:
-            current_extrusion = max(min_extrusion, min(max_extrusion, current_extrusion))
+        if hasattr(self, "_extrusion_initialized"):
+            current_extrusion = float(self.extrusion_spin.value())
+        else:
+            current_extrusion = default_extrusion
+        current_extrusion = max(min_extrusion, min(max_extrusion, current_extrusion))
         self.extrusion_spin.setValue(current_extrusion)
         self.extrusion_slider.setValue(int(current_extrusion * 10))
         self._extrusion_initialized = True
@@ -1158,11 +1168,6 @@ class MainWindow(QMainWindow):
         self._elastic_poly_mirror = elastic_poly_mirror
         self._polys_all = polys_all
         self._thickness = thickness
-        if not hasattr(self, "_extrusion_initialized"):
-            self.params.extrusion = thickness
-            self.extrusion_spin.setValue(thickness)
-            self.extrusion_slider.setValue(int(thickness * 10))
-            self._extrusion_initialized = True
 
         self.taper_label.setText(f"Taper Angle: {self._taper_angle_deg:.2f}°")
         self.tip_label.setText(f"Tip Size: {tip_size:.2f} mm")
@@ -1905,6 +1910,8 @@ class MainWindow(QMainWindow):
             import cadquery as cq
         except Exception:
             return
+        self.params.sim_stiffness = float(self.sim_stiffness_spin.value())
+        self.params.sim_damping = float(self.sim_damping_spin.value())
         out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2060,6 +2067,8 @@ class MainWindow(QMainWindow):
                 robot_length=self._robot_length,
                 site_points=site_points,
                 cable_mode=3 if not self.params.two_cable else 2,
+                joint_stiffness=self.params.sim_stiffness,
+                joint_damping=self.params.sim_damping,
             )
         except Exception as exc:
             print(f"[Export XML] failed: {exc}")
