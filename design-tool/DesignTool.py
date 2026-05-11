@@ -466,19 +466,20 @@ class MainWindow(QMainWindow):
         form_2d.setHorizontalSpacing(8)
         row = 0
         self.a_spin, self.a_slider, row = self._add_double_control(
-            form_2d, row, "a", "(mm)", 0.1, 100.0, 0.01, 4, self.params.a, scale=1000
+            form_2d, row, "a", "(mm)", 0.1, 100.0, 0.01, 4, self.params.a, scale=1000, tooltip="Initial spiral radius. Controls tip size."
         )
         self.b_spin, self.b_slider, row = self._add_double_control(
-            form_2d, row, "b", "", 0.01, 0.35, 0.001, 4, self.params.b, scale=10000
+            form_2d, row, "b", "", 0.01, 0.35, 0.001, 4, self.params.b, scale=10000, tooltip="Spiral growth rate. Higher values expand radius faster."
         )
         self.dtheta_spin, self.dtheta_slider, row = self._add_int_control(
-            form_2d, row, "Δθ", "(deg)", 1, 60, self.params.dtheta_deg
+            form_2d, row, "Δθ", "(deg)", 1, 60, self.params.dtheta_deg, tooltip="Angular step between segments. Lower values create more segments."
         )
+        
         self.theta_max_spin, self.theta_max_slider, row = self._add_double_control(
-            form_2d, row, "θ max", "(π)", 1.0, 12.0, 0.1, 1, self.params.theta_max_pi, scale=10
+            form_2d, row, "θ max", "(π)", 1.0, 12.0, 0.1, 1, self.params.theta_max_pi, scale=10,  tooltip="Total spiral angle. Controls overall robot length."
         )
         self.p_spin, self.p_slider, row = self._add_double_control(
-            form_2d, row, "p", "", 0.0, 0.5, 0.01, 2, self.params.p, scale=100
+            form_2d, row, "p", "", 0.0, 0.5, 0.01, 2, self.params.p, scale=100, tooltip="Internal shape factor controlling cross-section profile."
         )
 
         label_2d = QLabel("Spiral and section Parameters")
@@ -511,7 +512,7 @@ class MainWindow(QMainWindow):
         row += 1
 
         self.elastic_spin, self.elastic_slider, row = self._add_double_control(
-            form_3d, row, "Elastic core size", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10
+            form_3d, row, "Elastic core size", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10, tooltip="Percentage assigned to flexible region."
         )
 
         label_tendon_params = QLabel("Tendon Routing Parameters")
@@ -530,6 +531,7 @@ class MainWindow(QMainWindow):
             0,
             self.params.tip_hole_pos,
             scale=1,
+            tooltip="Tendon hole position near the tip as percentage of width."
         )
         self.tip_hole_size_spin, self.tip_hole_size_slider, row = self._add_double_control(
             form_3d,
@@ -542,6 +544,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.tip_hole_size,
             scale=10,
+            tooltip="Diameter of the tendon hole near the tip."
         )
         self.base_hole_pos_spin, self.base_hole_pos_slider, row = self._add_double_control(
             form_3d,
@@ -554,6 +557,7 @@ class MainWindow(QMainWindow):
             0,
             self.params.base_hole_pos,
             scale=1,
+            tooltip="Tendon hole position near the base as percentage of width."
         )
         self.base_hole_size_spin, self.base_hole_size_slider, row = self._add_double_control(
             form_3d,
@@ -566,6 +570,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.base_hole_size,
             scale=10,
+            tooltip="Diameter of the tendon hole near the base."
         )
 
         cable_row = QHBoxLayout()
@@ -613,6 +618,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.extrusion,
             scale=10,
+            tooltip="Height of the extrusion."
         )
         self.cone1_spin, self.cone1_slider, cable_row_idx = self._add_double_control(
             cable2_layout,
@@ -625,6 +631,7 @@ class MainWindow(QMainWindow):
             1,
             self.params.cone_angle1,
             scale=10,
+            tooltip="Taper angle in XZ plane."
         )
         self.cone2_spin, self.cone2_slider, cable_row_idx = self._add_double_control(
             cable2_layout,
@@ -637,6 +644,7 @@ class MainWindow(QMainWindow):
             1,
             self.params.cone_angle2,
             scale=10,
+            tooltip="Taper angle in YZ plane."
         )
         form_3d.addWidget(self.cable2_wrap, row, 0, 1, 3)
         row += 1
@@ -667,6 +675,7 @@ class MainWindow(QMainWindow):
             1,
             self.params.cable3_cut_pos,
             scale=10,
+            tooltip="Size of triangular profile cut for 3-cable mode."
         )
         self.cable3_cut_size_spin, self.cable3_cut_size_slider, cable3_cut_row = self._add_double_control(
             cable3_cut_params_layout,
@@ -679,6 +688,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.cable3_cut_size,
             scale=10,
+            tooltip="Size of circular side cut on each of the three profile faces."
         )
         cable3_layout.addWidget(self.cable3_cut_params_wrap, cable3_row_idx, 0, 1, 3)
         cable3_row_idx += 1
@@ -707,6 +717,8 @@ class MainWindow(QMainWindow):
             3,
             self.params.sim_stiffness,
             scale=10,
+            tooltip="Joint stiffness in simulation. Higher values make bending harder."
+
         )
         self.sim_damping_spin, self.sim_damping_slider, sim_row = self._add_double_control(
             form_sim,
@@ -719,6 +731,7 @@ class MainWindow(QMainWindow):
             3,
             self.params.sim_damping,
             scale=10,
+            tooltip="Joint damping in simulation. Higher values reduce oscillation."
         )
         panel_layout.addLayout(form_sim)
 
@@ -942,6 +955,7 @@ class MainWindow(QMainWindow):
         decimals: int,
         value: float,
         scale: int,
+        tooltip: str = "",
     ) -> Tuple[QDoubleSpinBox, QSlider, int]:
         box = QDoubleSpinBox()
         box.setRange(vmin, vmax)
@@ -965,11 +979,19 @@ class MainWindow(QMainWindow):
         label_widget.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         label_widget.setFixedWidth(self._param_label_width)
 
+        # Tooltips
+        if tooltip:
+            label_widget.setToolTip(tooltip)
+            box.setToolTip(tooltip)
+            slider.setToolTip(tooltip)
+
         grid.addWidget(label_widget, row, 0)
         grid.addWidget(slider, row, 1)
         grid.addWidget(box, row, 2)
+
         grid.setColumnStretch(1, 1)
         grid.setColumnMinimumWidth(2, self._param_spin_width)
+
         return box, slider, row + 1
 
     def _add_int_control(
@@ -981,6 +1003,7 @@ class MainWindow(QMainWindow):
         vmin: int,
         vmax: int,
         value: int,
+        tooltip: str = "",
     ) -> Tuple[QSpinBox, QSlider, int]:
         box = QSpinBox()
         box.setRange(vmin, vmax)
@@ -1001,6 +1024,12 @@ class MainWindow(QMainWindow):
         label_widget = QLabel(label_text)
         label_widget.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         label_widget.setFixedWidth(self._param_label_width)
+
+        # Tooltips
+        if tooltip:
+            label_widget.setToolTip(tooltip)
+            box.setToolTip(tooltip)
+            slider.setToolTip(tooltip)
 
         grid.addWidget(label_widget, row, 0)
         grid.addWidget(slider, row, 1)
