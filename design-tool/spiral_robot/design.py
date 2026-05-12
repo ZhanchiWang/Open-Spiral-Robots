@@ -218,3 +218,11 @@ def inverse_design(
         theta_end=theta_end,
         samples=samples,
     )
+
+
+def grip_diameter_min(a: float, b: float) -> float:
+    """
+    Minimum gripping diameter at half-turn (theta=0 to theta=pi).
+    Based on r(theta) = a * exp(b * theta).
+    """
+    return a * (1.0 + math.exp(b * math.pi))
