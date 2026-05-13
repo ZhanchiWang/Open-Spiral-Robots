@@ -73,6 +73,8 @@ class Params:
     base_hole_size: float = 3.0
     sim_stiffness: float = 0.5
     sim_damping: float = 0.2
+    append_base_cube: bool = True
+    base_cube_height: float = 40
     two_cable: bool = True
     cable3_cut_enabled: bool = True
     cable3_cut_pos: float = 25.0
@@ -510,6 +512,31 @@ class MainWindow(QMainWindow):
         form_3d.addWidget(elastic_wrap, row, 0, 1, 3)
         row += 1
 
+        base_cube_row = QHBoxLayout()
+        base_cube_row.setContentsMargins(0, 0, 0, 0)
+        base_cube_row.setSpacing(8)
+        self.base_cube_check = QCheckBox("Append Base Cube")
+        self.base_cube_check.setChecked(self.params.append_base_cube)
+        base_cube_row.addWidget(self.base_cube_check)
+        base_cube_row.addStretch(1)
+        base_cube_wrap = QWidget()
+        base_cube_wrap.setLayout(base_cube_row)
+        form_3d.addWidget(base_cube_wrap, row, 0, 1, 3)
+        row += 1
+
+        self.base_cube_height_spin, self.base_cube_height_slider, row = self._add_double_control(
+            form_3d,
+            row,
+            "Base Height",
+            "(mm)",
+            0.1,
+            100.0,
+            0.1,
+            2,
+            self.params.base_cube_height,
+            scale=10,
+        )
+
         self.elastic_spin, self.elastic_slider, row = self._add_double_control(
             form_3d, row, "Elastic", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10
         )
@@ -772,6 +799,7 @@ class MainWindow(QMainWindow):
         self.cable2_check.toggled.connect(self._on_cable2_checked)
         self.cable3_check.toggled.connect(self._on_cable3_checked)
         self.cable3_cut_check.toggled.connect(self._on_cable3_cut_toggled)
+        self.base_cube_check.toggled.connect(self._on_base_cube_toggled)
         self._on_cable_toggle(self.cable2_check.isChecked())
         for w in (
             self.a_spin,
@@ -783,6 +811,7 @@ class MainWindow(QMainWindow):
             self.extrusion_spin,
             self.cone1_spin,
             self.cone2_spin,
+            self.base_cube_height_spin,
             self.cable3_cut_pos_spin,
             self.cable3_cut_size_spin,
             self.tip_hole_pos_spin,
@@ -798,6 +827,7 @@ class MainWindow(QMainWindow):
             self.extrusion_slider,
             self.cone1_slider,
             self.cone2_slider,
+            self.base_cube_height_slider,
             self.cable3_cut_pos_slider,
             self.cable3_cut_size_slider,
             self.tip_hole_pos_slider,
@@ -876,6 +906,11 @@ class MainWindow(QMainWindow):
     def _on_cable3_cut_toggled(self, checked: bool) -> None:
         self.params.cable3_cut_enabled = bool(checked)
         self.cable3_cut_params_wrap.setVisible((not self.params.two_cable) and bool(checked))
+        self.schedule_update()
+
+    def _on_base_cube_toggled(self, checked: bool) -> None:
+        self.base_cube_height_spin.setEnabled(bool(checked))
+        self.base_cube_height_slider.setEnabled(bool(checked))
         self.schedule_update()
 
     def _on_cable_toggle(self, checked: bool) -> None:
@@ -1000,6 +1035,8 @@ class MainWindow(QMainWindow):
             delattr(self, "_cone2_initialized")
         if hasattr(self, "_extrusion_initialized"):
             delattr(self, "_extrusion_initialized")
+        if hasattr(self, "_base_cube_height_initialized"):
+            delattr(self, "_base_cube_height_initialized")
         defaults = Params()
         self.a_spin.setValue(defaults.a)
         self.b_spin.setValue(defaults.b)
@@ -1009,6 +1046,9 @@ class MainWindow(QMainWindow):
         self.p_spin.setValue(defaults.p)
         self.elastic_spin.setValue(defaults.elastic_percent)
         self.elastic_check.setChecked(defaults.elastic_enabled)
+        self.base_cube_check.setChecked(defaults.append_base_cube)
+        self.base_cube_height_spin.setValue(defaults.base_cube_height)
+        self._on_base_cube_toggled(defaults.append_base_cube)
         self.cable2_check.setChecked(defaults.two_cable)
         self.cable3_check.setChecked(not defaults.two_cable)
         self.cable3_cut_check.setChecked(defaults.cable3_cut_enabled)
@@ -1046,6 +1086,8 @@ class MainWindow(QMainWindow):
         self.params.p = float(self.p_spin.value())
         self.params.elastic_percent = float(self.elastic_spin.value())
         self.params.elastic_enabled = self.elastic_check.isChecked()
+        self.params.append_base_cube = self.base_cube_check.isChecked()
+        self.params.base_cube_height = float(self.base_cube_height_spin.value())
         self.params.tip_hole_pos = float(self.tip_hole_pos_spin.value()) / 100.0
         self.params.tip_hole_size = float(self.tip_hole_size_spin.value())
         self.params.base_hole_pos = float(self.base_hole_pos_spin.value()) / 100.0
@@ -1106,6 +1148,25 @@ class MainWindow(QMainWindow):
         self.extrusion_spin.blockSignals(False)
         self.extrusion_slider.blockSignals(False)
         self.params.extrusion = float(self.extrusion_spin.value())
+
+        min_base_height = 0.1
+        max_base_height = max(min_base_height, 200.0, self._base_size * 3.0)
+        default_base_height = 40
+        self.base_cube_height_spin.blockSignals(True)
+        self.base_cube_height_slider.blockSignals(True)
+        self.base_cube_height_spin.setRange(min_base_height, max_base_height)
+        self.base_cube_height_slider.setRange(int(min_base_height * 10), int(max_base_height * 10))
+        if hasattr(self, "_base_cube_height_initialized"):
+            current_base_height = float(self.base_cube_height_spin.value())
+        else:
+            current_base_height = default_base_height
+        current_base_height = max(min_base_height, min(max_base_height, current_base_height))
+        self.base_cube_height_spin.setValue(current_base_height)
+        self.base_cube_height_slider.setValue(int(current_base_height * 10))
+        self._base_cube_height_initialized = True
+        self.base_cube_height_spin.blockSignals(False)
+        self.base_cube_height_slider.blockSignals(False)
+        self.params.base_cube_height = float(self.base_cube_height_spin.value())
 
         elastic_poly = None
         elastic_poly_mirror = None
@@ -1362,6 +1423,58 @@ class MainWindow(QMainWindow):
         if cone_cuts is None:
             return extrude_cuts
         return extrude_cuts.union(cone_cuts)
+
+    def _build_base_cube_solid(self, cq):
+        if not self.params.append_base_cube or self._robot_length <= 1e-6 or self._base_size <= 1e-6:
+            return None
+        side = self._base_size
+        extrusion= self.params.extrusion
+        height = self._base_cube_height()
+        if height <= 1e-6:
+            return None
+        cube = (
+            cq.Workplane("XY")
+            .box(height, side, extrusion, centered=(True, True, True))
+            .translate((self._robot_length + height * 0.5, 0.0, 0.0))
+        )
+        holes = self._build_base_cube_holes(cq, height)
+        if holes is not None:
+            cube = cube.cut(holes)
+        return cube
+
+    def _build_base_cube_holes(self, cq, height: float):
+        radius = max(0.01, float(self.base_hole_size_spin.value()) * 0.5)
+        base_pos = max(0.0, min(1.0, float(self.base_hole_pos_spin.value()) / 100.0))
+        y_center = base_pos * (self._base_size * 0.5)
+        cutter = (
+            cq.Workplane("YZ")
+            .center(y_center, 0.0)
+            .circle(radius)
+            .extrude(height)
+            .translate((self._robot_length, 0.0, 0.0))
+        )
+        angles = (0.0, 180.0) if self.params.two_cable else (0.0, 120.0, 240.0)
+        holes = None
+        for ang in angles:
+            inst = cutter if abs(ang) <= 1e-6 else cutter.rotate((0, 0, 0), (1, 0, 0), ang)
+            holes = inst if holes is None else holes.union(inst)
+        return holes
+
+    def _base_cube_height(self) -> float:
+        if hasattr(self, "base_cube_height_spin"):
+            return max(0.0, float(self.base_cube_height_spin.value()))
+        return max(0.0, self.params.base_cube_height)
+
+    def _base_cube_end_x(self) -> float:
+        if not self.params.append_base_cube or self._base_size <= 1e-6:
+            return self._robot_length
+        return self._robot_length + self._base_cube_height()
+
+    def _append_base_cube(self, main, cq):
+        base_cube = self._build_base_cube_solid(cq)
+        if base_cube is None:
+            return main
+        return main.union(base_cube)
 
     def update_scene(self) -> None:
         # Heavy 3D rebuild on demand
@@ -1737,6 +1850,17 @@ class MainWindow(QMainWindow):
             xs = [p[0] for p in elastic_poly_mirror]
             ys = [p[1] for p in elastic_poly_mirror]
             ax.fill(xs, ys, color="#ff7f0e", alpha=0.28, edgecolor="#ff7f0e", linewidth=0.9)
+        if self.params.append_base_cube and self._base_size > 1e-6:
+            base_end_x = self._base_cube_end_x()
+            base_rect = [
+                (self._robot_length, -self._base_size * 0.5),
+                (base_end_x, -self._base_size * 0.5),
+                (base_end_x, self._base_size * 0.5),
+                (self._robot_length, self._base_size * 0.5),
+            ]
+            xs = [p[0] for p in base_rect]
+            ys = [p[1] for p in base_rect]
+            ax.fill(xs, ys, color="#b5bdc8", alpha=0.45, edgecolor="#6f7782", linewidth=0.8)
         if draw_rays and self._ray_start and self._ray_upper_end and self._ray_lower_end:
             def _clip_ray(start: Point2D, end: Point2D, x_max: float) -> Point2D:
                 sx, sy = start
@@ -1766,6 +1890,8 @@ class MainWindow(QMainWindow):
         if primary:
             min_x = min(min(x for x, _y in poly) for poly in primary)
             max_x = max(max(x for x, _y in poly) for poly in primary)
+            if self.params.append_base_cube and self._base_size > 1e-6:
+                max_x = max(max_x, self._base_cube_end_x())
             if self._ray_start and self._ray_upper_end and self._ray_lower_end:
                 min_x = min(min_x, self._ray_start[0])
                 max_x = max(max_x, self._ray_upper_end[0], self._ray_lower_end[0])
@@ -2156,6 +2282,7 @@ class MainWindow(QMainWindow):
                 if elastic is not None:
                     elastic = elastic.cut(cone2_solid)
 
+            main = self._append_base_cube(main, cq)
             return (main, elastic)
 
         main = None
@@ -2199,6 +2326,7 @@ class MainWindow(QMainWindow):
             main = main.cut(cable3_cut)
             if elastic is not None:
                 elastic = elastic.cut(cable3_cut)
+        main = self._append_base_cube(main, cq)
         return (main, elastic)
 
 
