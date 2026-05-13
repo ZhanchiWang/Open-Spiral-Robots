@@ -2,3 +2,4 @@
 local/
 extensions/multi-robot-array/output/
 __pycache__/
+.vscode/
