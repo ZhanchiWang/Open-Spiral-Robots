@@ -51,6 +51,7 @@ except Exception:
     QVTKOpenGLNativeWidget = None
     from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 
+from spiral_robot.design import grip_diameter_min
 
 Point2D = Tuple[float, float]
 
@@ -77,8 +78,10 @@ class Params:
     cable3_cut_enabled: bool = True
     cable3_cut_pos: float = 25.0
     cable3_cut_size: float = 14.0
-
-
+    backbone_enabled: bool = False
+    backbone_diameter: float = 1.0
+    backbone_offset: float = 35.0
+    
 class ToggleSwitch(QWidget):
     toggled = Signal(bool)
     def __init__(
@@ -394,12 +397,14 @@ class MainWindow(QMainWindow):
         info_layout.setVerticalSpacing(6)
         self.taper_label = QLabel("Taper Angle: --")
         self.tip_label = QLabel("Tip Size: --")
+        self.min_grip_diameter_label = QLabel("Min Grip Diameter: --")
         self.base_label = QLabel("Base Size: --")
         self.length_label = QLabel("Robot Length: --")
         self.units_label = QLabel("Num of Units: --")
         for lbl in (
             self.taper_label,
             self.tip_label,
+            self.min_grip_diameter_label,
             self.base_label,
             self.length_label,
             self.units_label,
@@ -407,9 +412,10 @@ class MainWindow(QMainWindow):
             lbl.setStyleSheet("color: #7a7f87; font-size: 14px;")
         info_layout.addWidget(self.taper_label, 0, 0)
         info_layout.addWidget(self.tip_label, 0, 1)
-        info_layout.addWidget(self.units_label, 0, 2)
+        info_layout.addWidget(self.min_grip_diameter_label, 0, 2)
         info_layout.addWidget(self.length_label, 1, 0)
         info_layout.addWidget(self.base_label, 1, 1)
+        info_layout.addWidget(self.units_label, 1, 2)
         left_split.addWidget(info_panel)
         left_split.setStretchFactor(0, 3)
         left_split.setStretchFactor(1, 2)
@@ -466,22 +472,23 @@ class MainWindow(QMainWindow):
         form_2d.setHorizontalSpacing(8)
         row = 0
         self.a_spin, self.a_slider, row = self._add_double_control(
-            form_2d, row, "a", "(mm)", 0.1, 100.0, 0.01, 4, self.params.a, scale=1000
+            form_2d, row, "a", "(mm)", 0.1, 100.0, 0.01, 4, self.params.a, scale=1000, tooltip="Initial spiral radius. Controls tip size."
         )
         self.b_spin, self.b_slider, row = self._add_double_control(
-            form_2d, row, "b", "", 0.01, 0.35, 0.001, 4, self.params.b, scale=10000
+            form_2d, row, "b", "", 0.01, 0.35, 0.001, 4, self.params.b, scale=10000, tooltip="Spiral growth rate. Higher values expand radius faster."
         )
         self.dtheta_spin, self.dtheta_slider, row = self._add_int_control(
-            form_2d, row, "Δθ", "(deg)", 1, 60, self.params.dtheta_deg
+            form_2d, row, "Δθ", "(deg)", 1, 60, self.params.dtheta_deg, tooltip="Angular step between segments. Lower values create more segments."
         )
+        
         self.theta_max_spin, self.theta_max_slider, row = self._add_double_control(
-            form_2d, row, "θ max", "(π)", 1.0, 12.0, 0.1, 1, self.params.theta_max_pi, scale=10
+            form_2d, row, "θ max", "(π)", 1.0, 12.0, 0.1, 1, self.params.theta_max_pi, scale=10,  tooltip="Total spiral angle. Controls overall robot length."
         )
         self.p_spin, self.p_slider, row = self._add_double_control(
-            form_2d, row, "p", "", 0.0, 0.5, 0.01, 2, self.params.p, scale=100
+            form_2d, row, "p", "", 0.0, 0.5, 0.01, 2, self.params.p, scale=100, tooltip="Internal shape factor controlling cross-section profile."
         )
 
-        label_2d = QLabel("2D Parameters")
+        label_2d = QLabel("Spiral and section Parameters")
         label_2d.setStyleSheet("font-weight:600; color:#666;")
         panel_layout.addWidget(label_2d)
         panel_layout.addLayout(form_2d)
@@ -489,7 +496,7 @@ class MainWindow(QMainWindow):
         self.save_img_btn = QPushButton("Save 2D Sketch")
         panel_layout.addWidget(self.save_img_btn)
 
-        label_holes = QLabel("Fabrication Parameters")
+        label_holes = QLabel("Elastic Core Parameters")
         label_holes.setStyleSheet("font-weight:600; color:#666;")
         panel_layout.addWidget(label_holes)
         form_3d = QGridLayout()
@@ -501,7 +508,7 @@ class MainWindow(QMainWindow):
         elastic_row.setContentsMargins(0, 0, 0, 0)
         elastic_row.setSpacing(8)
         self.elastic_check = ToggleSwitch(self.params.elastic_enabled)
-        elastic_label = QLabel("Elastic Layer/Axis")
+        elastic_label = QLabel("Enable elastic core")
         elastic_row.addWidget(self.elastic_check)
         elastic_row.addWidget(elastic_label)
         elastic_row.addStretch(1)
@@ -511,8 +518,65 @@ class MainWindow(QMainWindow):
         row += 1
 
         self.elastic_spin, self.elastic_slider, row = self._add_double_control(
-            form_3d, row, "Elastic", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10
+            form_3d, row, "Elastic core size", "(%)", 0.0, 100.0, 1.0, 1, self.params.elastic_percent, scale=10, tooltip="Percentage assigned to flexible region."
         )
+
+        backbone_row = QHBoxLayout()
+        backbone_row.setContentsMargins(0, 0, 0, 0)
+        backbone_row.setSpacing(8)
+
+        self.backbone_check = ToggleSwitch(self.params.backbone_enabled)
+
+        backbone_label = QLabel("Enable backbone hole(s)")
+
+        backbone_row.addWidget(self.backbone_check)
+        backbone_row.addWidget(backbone_label)
+        backbone_row.addStretch(1)
+
+        backbone_wrap = QWidget()
+        backbone_wrap.setLayout(backbone_row)
+
+        form_3d.addWidget(backbone_wrap, row, 0, 1, 3)
+        row += 1  
+
+        self.backbone_dia_spin, self.backbone_dia_slider, row = self._add_double_control(
+            form_3d,
+            row,
+            "Backbone Hole",
+            "(mm)",
+            0.2,
+            10.0,
+            0.1,
+            1,
+            self.params.backbone_diameter,
+            scale=10,
+            tooltip="Diameter of the central longitudinal backbone channel."
+        )
+
+        self.backbone_offset_spin, self.backbone_offset_slider, row = self._add_double_control(
+            form_3d,
+            row,
+            "Backbone Offset",
+            "(%)",
+            0.0,
+            100.0,
+            1.0,
+            0,
+            self.params.backbone_offset,
+            scale=1,
+            tooltip="2DOF mode only.\nRadial position of lateral backbone holes.\n0 = center, 100 = outer edge."
+        )        
+
+        self.backbone_check.toggled.connect(self.backbone_dia_spin.setEnabled)
+        self.backbone_check.toggled.connect(self.backbone_dia_slider.setEnabled)
+
+        self.backbone_dia_spin.setEnabled(self.params.backbone_enabled)
+        self.backbone_dia_slider.setEnabled(self.params.backbone_enabled)        
+
+        label_tendon_params = QLabel("Tendon Routing Parameters")
+        label_tendon_params.setStyleSheet("font-weight:600; color:#666;")
+        form_3d.addWidget(label_tendon_params, row, 0, 1, 3)
+        row += 1
 
         self.tip_hole_pos_spin, self.tip_hole_pos_slider, row = self._add_double_control(
             form_3d,
@@ -525,6 +589,7 @@ class MainWindow(QMainWindow):
             0,
             self.params.tip_hole_pos,
             scale=1,
+            tooltip="Tendon hole position near the tip as percentage of width."
         )
         self.tip_hole_size_spin, self.tip_hole_size_slider, row = self._add_double_control(
             form_3d,
@@ -537,6 +602,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.tip_hole_size,
             scale=10,
+            tooltip="Diameter of the tendon hole near the tip."
         )
         self.base_hole_pos_spin, self.base_hole_pos_slider, row = self._add_double_control(
             form_3d,
@@ -549,6 +615,7 @@ class MainWindow(QMainWindow):
             0,
             self.params.base_hole_pos,
             scale=1,
+            tooltip="Tendon hole position near the base as percentage of width."
         )
         self.base_hole_size_spin, self.base_hole_size_slider, row = self._add_double_control(
             form_3d,
@@ -561,11 +628,24 @@ class MainWindow(QMainWindow):
             2,
             self.params.base_hole_size,
             scale=10,
+            tooltip="Diameter of the tendon hole near the base."
         )
 
         cable_row = QHBoxLayout()
         cable_row.setContentsMargins(0, 0, 0, 0)
         cable_row.setSpacing(8)
+
+        label_mode = QLabel("DOF Mode")
+        label_mode.setStyleSheet("""
+            font-weight:600;
+            color:#666;
+            padding-top:6px;
+            padding-bottom:2px;
+        """)
+
+        form_3d.addWidget(label_mode, row, 0, 1, 3)
+        row += 1
+
         self.cable_mode_title = QLabel("Num of Cables")
         self.cable2_check = QCheckBox("2")
         self.cable3_check = QCheckBox("3")
@@ -596,6 +676,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.extrusion,
             scale=10,
+            tooltip="Height of the extrusion."
         )
         self.cone1_spin, self.cone1_slider, cable_row_idx = self._add_double_control(
             cable2_layout,
@@ -608,6 +689,7 @@ class MainWindow(QMainWindow):
             1,
             self.params.cone_angle1,
             scale=10,
+            tooltip="Taper angle in XZ plane."
         )
         self.cone2_spin, self.cone2_slider, cable_row_idx = self._add_double_control(
             cable2_layout,
@@ -620,6 +702,7 @@ class MainWindow(QMainWindow):
             1,
             self.params.cone_angle2,
             scale=10,
+            tooltip="Taper angle in YZ plane."
         )
         form_3d.addWidget(self.cable2_wrap, row, 0, 1, 3)
         row += 1
@@ -650,6 +733,7 @@ class MainWindow(QMainWindow):
             1,
             self.params.cable3_cut_pos,
             scale=10,
+            tooltip="Size of triangular profile cut for 3-cable mode."
         )
         self.cable3_cut_size_spin, self.cable3_cut_size_slider, cable3_cut_row = self._add_double_control(
             cable3_cut_params_layout,
@@ -662,6 +746,7 @@ class MainWindow(QMainWindow):
             2,
             self.params.cable3_cut_size,
             scale=10,
+            tooltip="Size of circular side cut on each of the three profile faces."
         )
         cable3_layout.addWidget(self.cable3_cut_params_wrap, cable3_row_idx, 0, 1, 3)
         cable3_row_idx += 1
@@ -690,6 +775,8 @@ class MainWindow(QMainWindow):
             3,
             self.params.sim_stiffness,
             scale=10,
+            tooltip="Joint stiffness in simulation. Higher values make bending harder."
+
         )
         self.sim_damping_spin, self.sim_damping_slider, sim_row = self._add_double_control(
             form_sim,
@@ -702,6 +789,7 @@ class MainWindow(QMainWindow):
             3,
             self.params.sim_damping,
             scale=10,
+            tooltip="Joint damping in simulation. Higher values reduce oscillation."
         )
         panel_layout.addLayout(form_sim)
 
@@ -925,6 +1013,7 @@ class MainWindow(QMainWindow):
         decimals: int,
         value: float,
         scale: int,
+        tooltip: str = "",
     ) -> Tuple[QDoubleSpinBox, QSlider, int]:
         box = QDoubleSpinBox()
         box.setRange(vmin, vmax)
@@ -948,11 +1037,19 @@ class MainWindow(QMainWindow):
         label_widget.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         label_widget.setFixedWidth(self._param_label_width)
 
+        # Tooltips
+        if tooltip:
+            label_widget.setToolTip(tooltip)
+            box.setToolTip(tooltip)
+            slider.setToolTip(tooltip)
+
         grid.addWidget(label_widget, row, 0)
         grid.addWidget(slider, row, 1)
         grid.addWidget(box, row, 2)
+
         grid.setColumnStretch(1, 1)
         grid.setColumnMinimumWidth(2, self._param_spin_width)
+
         return box, slider, row + 1
 
     def _add_int_control(
@@ -964,6 +1061,7 @@ class MainWindow(QMainWindow):
         vmin: int,
         vmax: int,
         value: int,
+        tooltip: str = "",
     ) -> Tuple[QSpinBox, QSlider, int]:
         box = QSpinBox()
         box.setRange(vmin, vmax)
@@ -984,6 +1082,12 @@ class MainWindow(QMainWindow):
         label_widget = QLabel(label_text)
         label_widget.setAlignment(Qt.AlignHCenter | Qt.AlignVCenter)
         label_widget.setFixedWidth(self._param_label_width)
+
+        # Tooltips
+        if tooltip:
+            label_widget.setToolTip(tooltip)
+            box.setToolTip(tooltip)
+            slider.setToolTip(tooltip)
 
         grid.addWidget(label_widget, row, 0)
         grid.addWidget(slider, row, 1)
@@ -1107,6 +1211,17 @@ class MainWindow(QMainWindow):
         self.extrusion_slider.blockSignals(False)
         self.params.extrusion = float(self.extrusion_spin.value())
 
+        self.params.backbone_enabled = self.backbone_check.isChecked()
+        self.params.backbone_diameter = float(self.backbone_dia_spin.value())
+
+        self.params.backbone_diameter = float(self.backbone_dia_spin.value())
+        self.params.backbone_offset = float(self.backbone_offset_spin.value()) / 100.0
+
+        is_2dof = self.params.two_cable
+
+        self.backbone_offset_spin.setVisible(is_2dof)
+        self.backbone_offset_slider.setVisible(is_2dof)        
+
         elastic_poly = None
         elastic_poly_mirror = None
         # Rays are based on taper angle and virtual tip
@@ -1154,6 +1269,7 @@ class MainWindow(QMainWindow):
 
         self.taper_label.setText(f"Taper Angle: {self._taper_angle_deg:.2f}°")
         self.tip_label.setText(f"Tip Size: {tip_size:.2f} mm")
+        self.min_grip_diameter_label.setText(f"Min Grip Diameter: {grip_diameter_min(self.params.a, self.params.b):.2f} mm")
         self.base_label.setText(f"Base Size: {base_size:.2f} mm")
         self.length_label.setText(f"Robot Length: {self._robot_length:.2f} mm")
         self.units_label.setText(f"Num of Units: {len(primary)}")
@@ -1231,6 +1347,126 @@ class MainWindow(QMainWindow):
         tz = p1[2] - end_rot[2]
         frustum = frustum.translate((tx, ty, tz))
         return frustum
+
+
+    def _build_backbone_frustum_solid(self, sign=1.0):
+        if self._robot_length <= 1e-6:
+            return None
+
+        try:
+            import cadquery as cq
+        except Exception:
+            return None
+
+        import math
+
+        offset = float(self.backbone_offset_spin.value()) / 100.0
+        diameter = float(self.backbone_dia_spin.value())
+
+        thickness = max(0.1, float(self.extrusion_spin.value()))
+        cone1 = float(self.cone1_spin.value())
+
+        # base z
+        z0 = sign * offset * (thickness * 0.5)
+
+        # taper at tip
+        reduction = math.tan(math.radians(cone1 * 0.5)) * self._robot_length
+        tip_half = max(diameter * 0.6, (thickness * 0.5) - reduction)
+
+        z1 = sign * offset * tip_half
+
+        p0 = (0.0, 0.0, z1)
+        p1 = (self._robot_length, 0.0, z0)
+
+        dx = p1[0] - p0[0]
+        dz = p1[2] - p0[2]
+
+        length_axis = math.sqrt(dx * dx + dz * dz)
+        if length_axis <= 1e-6:
+            return None
+
+        profile = [
+            (0.0, 0.0),
+            (length_axis, 0.0),
+            (length_axis, diameter * 0.5),
+            (0.0, diameter * 0.5),
+        ]
+
+        solid = (
+            cq.Workplane("XY")
+            .polyline(profile)
+            .close()
+            .revolve(360, (0, 0, 0), (1, 0, 0))
+        )
+
+        angle = math.degrees(math.atan2(dz, dx))
+        solid = solid.rotate((0, 0, 0), (0, 1, 0), -angle)
+
+        solid = solid.translate(p0)
+
+        return solid
+
+    def _build_backbone_solid(self):
+        try:
+            import cadquery as cq
+        except Exception:
+            return None
+
+        if self._robot_length <= 1e-6:
+            return None
+
+        # diameter
+        diameter = max(0.2, float(self.params.backbone_diameter))  # mm  
+
+        solid = (
+            cq.Workplane("YZ")
+            .center(0, 0)
+            .circle(diameter * 0.5)
+            .extrude(self._robot_length)
+        )
+
+        return solid
+
+    def _build_backbone_preview_solid(self):
+        try:
+            import cadquery as cq
+        except Exception:
+            return None
+
+        if not self.backbone_check.isChecked():
+            return None
+
+        bb_radius = float(self.backbone_dia_spin.value()) * 0.5
+        length = self._robot_length + 20.0
+
+        solids = []
+
+        # central backbone
+        center_hole = (
+            cq.Workplane("YZ")
+            .circle(bb_radius)
+            .extrude(length)
+            .translate((-10.0, 0.0, 0.0))
+        )
+        solids.append(center_hole)
+
+        # lateral exact same solids as CAD holes
+        if self.params.two_cable:
+
+            upper = self._build_backbone_frustum_solid(+1.0)
+            lower = self._build_backbone_frustum_solid(-1.0)
+
+            if upper is not None:
+                solids.append(upper)
+
+            if lower is not None:
+                solids.append(lower)
+
+        result = solids[0]
+        for s in solids[1:]:
+            result = result.union(s)
+
+        return result
 
     def _build_cone2_preview_solid(self):
         if not self.params.two_cable:
@@ -1551,6 +1787,43 @@ class MainWindow(QMainWindow):
             c_actor.GetProperty().SetEdgeColor(0.8, 0.7, 0.2)
             c_actor.GetProperty().BackfaceCullingOff()
             self.renderer.AddActor(c_actor)
+
+        # ---------------------------------
+        # Backbone preview
+        # ---------------------------------
+        if self.backbone_check.isChecked():
+            bb_solid = (
+                self._build_backbone_preview_solid()
+                if hasattr(self, "_build_backbone_preview_solid")
+                else None
+            )
+
+            if bb_solid is not None:
+                bb_path = os.path.join(out_dir, "backbone_preview.stl")
+
+                try:
+                    import cadquery as cq
+                    cq.exporters.export(bb_solid.val(), bb_path)
+
+                    bb_reader = vtkSTLReader()
+                    bb_reader.SetFileName(bb_path)
+                    bb_reader.Update()
+
+                    bb_mapper = vtkPolyDataMapper()
+                    bb_mapper.SetInputData(bb_reader.GetOutput())
+
+                    bb_actor = vtkActor()
+                    bb_actor.SetMapper(bb_mapper)
+
+                    bb_actor.GetProperty().SetColor(1.0, 0.9, 0.2)
+                    bb_actor.GetProperty().SetOpacity(0.9)
+                    bb_actor.GetProperty().EdgeVisibilityOn()
+                    bb_actor.GetProperty().SetEdgeColor(0.8, 0.7, 0.1)
+
+                    self.renderer.AddActor(bb_actor)
+
+                except Exception:
+                    pass
 
         self.renderer.AddActor(self._axes_actor)
         if not self._camera_initialized:
@@ -2150,11 +2423,57 @@ class MainWindow(QMainWindow):
                     if elastic is not None:
                         elastic = elastic.cut(holes)
 
+            # ==========================
+            # BACKBONE HOLES
+            # ==========================
+            if self.backbone_check.isChecked():
+                bb_radius = float(self.backbone_dia_spin.value()) * 0.5
+                length = self._robot_length + 20.0
+
+                holes = []
+
+                # central hole
+                center_hole = (
+                    cq.Workplane("YZ")
+                    .circle(bb_radius)
+                    .extrude(length)
+                    .translate((-10.0, 0.0, 0.0))
+                )
+                holes.append(center_hole)
+
+                # lateral tapered holes only in 2DOF
+                if self.params.two_cable:
+                    upper = self._build_backbone_frustum_solid(+1.0)
+                    lower = self._build_backbone_frustum_solid(-1.0)
+
+                    if upper is not None:
+                        holes.append(upper)
+
+                    if lower is not None:
+                        holes.append(lower)
+
+                bb_hole = holes[0]
+                for h in holes[1:]:
+                    bb_hole = bb_hole.union(h)
+
+                main = main.cut(bb_hole)
+
+                if elastic is not None:
+                    elastic = elastic.cut(bb_hole)
+
             cone2_solid = self._build_cone2_preview_solid()
             if cone2_solid is not None:
                 main = main.cut(cone2_solid)
                 if elastic is not None:
                     elastic = elastic.cut(cone2_solid)
+
+            # Backbone hole (2DOF)
+            if self.params.backbone_enabled:
+                backbone = self._build_backbone_solid()
+                if backbone is not None:
+                    main = main.cut(backbone)
+                    if elastic is not None:
+                        elastic = elastic.cut(backbone)                    
 
             return (main, elastic)
 
@@ -2199,6 +2518,15 @@ class MainWindow(QMainWindow):
             main = main.cut(cable3_cut)
             if elastic is not None:
                 elastic = elastic.cut(cable3_cut)
+
+        # Backbone center hole
+        if self.params.backbone_enabled:
+            backbone = self._build_backbone_solid()
+            if backbone is not None:
+                main = main.cut(backbone)
+                if elastic is not None:
+                    elastic = elastic.cut(backbone)
+
         return (main, elastic)
 
 
