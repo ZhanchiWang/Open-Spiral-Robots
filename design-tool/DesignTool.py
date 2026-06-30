@@ -422,6 +422,10 @@ class MainWindow(QMainWindow):
             self.vtk_widget = QVTKOpenGLNativeWidget()
         else:
             self.vtk_widget = QVTKRenderWindowInteractor()
+        if sys.platform == "darwin":
+            # Qt 6.10 on macOS otherwise retriggers paintEvent from each VTK
+            # render, causing an infinite render/repaint loop.
+            self.vtk_widget.setAttribute(Qt.WA_PaintOnScreen, False)
         self.vtk_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.vtk_widget.setMinimumSize(240, 200)
         self.vtk_placeholder = QLabel("3D Preview (placeholder)")
@@ -2221,7 +2225,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 
