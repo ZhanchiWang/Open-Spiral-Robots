@@ -11,10 +11,12 @@ from PySide6.QtCore import QMarginsF
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QDoubleSpinBox,
     QGridLayout,
     QHBoxLayout,
     QCheckBox,
+    QComboBox,
     QLabel,
     QMainWindow,
     QPushButton,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -33,7 +36,7 @@ import matplotlib.image as mpimg
 
 from vtkmodules.vtkCommonCore import vtkPoints
 from vtkmodules.vtkCommonDataModel import vtkCellArray, vtkPolygon, vtkPolyData, vtkPlane, vtkPlaneCollection
-from vtkmodules.vtkFiltersCore import vtkCleanPolyData, vtkTriangleFilter, vtkClipPolyData, vtkPolyDataNormals
+from vtkmodules.vtkFiltersCore import vtkCleanPolyData, vtkTriangleFilter, vtkClipPolyData, vtkPolyDataNormals, vtkDecimatePro
 from vtkmodules.vtkFiltersSources import vtkPlaneSource, vtkArrowSource, vtkCubeSource, vtkSphereSource
 from vtkmodules.vtkFiltersModeling import vtkLinearExtrusionFilter
 from vtkmodules.vtkFiltersGeneral import vtkTransformPolyDataFilter, vtkClipClosedSurface
@@ -43,7 +46,7 @@ from vtkmodules.vtkRenderingCore import vtkWindowToImageFilter
 from vtkmodules.vtkRenderingCore import vtkActor, vtkPolyDataMapper, vtkRenderer
 from vtkmodules.vtkIOGeometry import vtkSTLReader
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleTrackballCamera
-from vtkmodules.vtkRenderingAnnotation import vtkAxesActor
+from vtkmodules.vtkRenderingAnnotation import vtkAxesActor, vtkLegendBoxActor
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
 try:
     from vtkmodules.qt.QVTKOpenGLNativeWidget import QVTKOpenGLNativeWidget
@@ -71,11 +74,17 @@ class Params:
     tip_hole_size: float = 1.4
     base_hole_pos: float = 90.0
     base_hole_size: float = 3.0
-    sim_stiffness: float = 0.5
+    sim_stiffness: float = 5.0
     sim_damping: float = 0.2
+    gravity: float = 0.0
+    pose_enabled: bool = False
+    filler_auto: bool = True
+    bend_dir_deg: float = 0.0
     two_cable: bool = True
+    num_cables: int = 3
+    teardrop_holes: bool = False
     cable3_cut_enabled: bool = True
-    cable3_cut_pos: float = 25.0
+    cable3_cut_pos: float = 0.0
     cable3_cut_size: float = 14.0
 
 
@@ -167,6 +176,35 @@ def _line_segment_intersection(
     if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
         return (ax + t * r_x, ay + t * r_y)
     return None
+
+
+def _rodrigues(
+    px: float, py: float, pz: float,
+    ux: float, uy: float, uz: float,
+    angle_deg: float,
+) -> Tuple[float, float, float]:
+    """Rotate vector (px,py,pz) about unit axis (ux,uy,uz) by angle_deg."""
+    th = math.radians(angle_deg)
+    c, s = math.cos(th), math.sin(th)
+    dot = ux * px + uy * py + uz * pz
+    rx = px * c + (uy * pz - uz * py) * s + ux * dot * (1.0 - c)
+    ry = py * c + (uz * px - ux * pz) * s + uy * dot * (1.0 - c)
+    rz = pz * c + (ux * py - uy * px) * s + uz * dot * (1.0 - c)
+    return (rx, ry, rz)
+
+
+def _rotate_point_about_axis(
+    p: Tuple[float, float, float],
+    axis_pt: Tuple[float, float, float],
+    axis_dir: Tuple[float, float, float],
+    angle_deg: float,
+) -> Tuple[float, float, float]:
+    rx, ry, rz = _rodrigues(
+        p[0] - axis_pt[0], p[1] - axis_pt[1], p[2] - axis_pt[2],
+        axis_dir[0], axis_dir[1], axis_dir[2],
+        angle_deg,
+    )
+    return (rx + axis_pt[0], ry + axis_pt[1], rz + axis_pt[2])
 
 
 def _build_unfold_polygons(
@@ -329,6 +367,244 @@ def _extrude(polydata: vtkPolyData, thickness: float) -> vtkPolyData:
     return clean.GetOutput()
 
 
+# Distinct color identity per tendon (index 0 == tendon 1). Reused by the
+# cross-section schematic so each cable is visually distinguishable.
+TENDON_COLORS = [
+    (0.90, 0.20, 0.20),  # 1 red
+    (0.20, 0.60, 0.90),  # 2 blue
+    (0.20, 0.72, 0.28),  # 3 green
+    (0.95, 0.62, 0.10),  # 4 orange
+    (0.62, 0.26, 0.85),  # 5 purple
+    (0.10, 0.72, 0.70),  # 6 teal
+    (0.88, 0.32, 0.68),  # 7 pink
+    (0.45, 0.45, 0.45),  # 8 gray
+]
+
+
+def _tendon_color(idx: int) -> tuple[float, float, float]:
+    return TENDON_COLORS[idx % len(TENDON_COLORS)]
+
+
+class _SectionPreview(QWidget):
+    """Schematic of the cross-section showing each tendon's angular position.
+
+    Tendon k (1-based) is anchored at 90 + k*360/n degrees in the section plane
+    (matches the site offsets in xml_generator.build_sites). The currently
+    selected tendon is highlighted with a dark ring.
+    """
+
+    def __init__(self, num_cables: int, parent=None) -> None:
+        super().__init__(parent)
+        self._n = max(2, int(num_cables))
+        self._current = 0
+        self.setMinimumSize(150, 172)
+
+    def set_current(self, idx: int) -> None:
+        self._current = max(0, idx)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        from PySide6.QtGui import QBrush, QColor, QFont, QPen
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        cx, cy = int(w * 0.5), int(h * 0.52)
+        radius = int(max(20, min(w, h) * 0.36))
+
+        p.setFont(QFont("Segoe UI", 8))
+        p.setPen(QColor(0x55, 0x55, 0x55))
+        p.drawText(6, 12, f"Cross-section ({self._n} cables)")
+
+        # section disc
+        p.setPen(QPen(QColor(0x40, 0x40, 0x40), 1.4))
+        p.setBrush(QBrush(QColor(0xf2, 0xf4, 0xf7)))
+        p.drawEllipse(cx - radius, cy - radius, 2 * radius, 2 * radius)
+
+        # X / Y axes (Y is up on screen)
+        p.setPen(QPen(QColor(0x90, 0x90, 0x90), 1, Qt.DashLine))
+        p.drawLine(cx - radius - 4, cy, cx + radius + 4, cy)
+        p.drawLine(cx, cy - radius - 4, cx, cy + radius + 4)
+        p.setPen(QColor(0x70, 0x70, 0x70))
+        p.drawText(cx + radius + 2, cy + 3, "X")
+        p.drawText(cx + 2, cy - radius - 4, "Y")
+
+        # tendon marks
+        for k in range(self._n):
+            theta = math.radians(90.0 + k * 360.0 / self._n)
+            sx = cx + radius * math.cos(theta)
+            sy = cy - radius * math.sin(theta)
+            r, g, b = _tendon_color(k)
+            qc = QColor(int(r * 255), int(g * 255), int(b * 255))
+
+            if k == self._current:
+                p.setPen(QPen(QColor(0x20, 0x20, 0x20), 2))
+                p.setBrush(Qt.NoBrush)
+                p.drawEllipse(int(sx - 11), int(sy - 11), 22, 22)
+                p.setFont(QFont("Segoe UI", 9, QFont.Bold))
+            else:
+                p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1))
+                p.setFont(QFont("Segoe UI", 8))
+
+            p.setBrush(QBrush(qc))
+            p.drawEllipse(int(sx - 5), int(sy - 5), 10, 10)
+
+            # number label pushed slightly along the outward direction
+            lx = cx + (radius + 10) * math.cos(theta)
+            ly = cy - (radius + 10) * math.sin(theta)
+            p.setPen(QColor(0x20, 0x20, 0x20))
+            p.drawText(int(lx - 4), int(ly + 3), str(k + 1))
+
+
+class TendonConfigDialog(QDialog):
+    """Per-tendon configuration dialog for MuJoCo XML export.
+
+    Lets the user set each tendon's ctrl range, gear, and which joint the cable
+    connects to. The joint is the "root -> that joint" semantic: a cable set to
+    joint j spans links 1..j+1 and drives joints 1..j. "All (full chain)" means
+    the cable runs from the root to the tip (links 1..N).
+    """
+
+    DEFAULT_GEAR = 50.0
+    DEFAULT_CTRL_LO = -1.0
+    DEFAULT_CTRL_HI = 1.0
+
+    def __init__(self, num_tendons: int, num_joints: int, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Tendon Configuration")
+        self.num_tendons = max(2, int(num_tendons))
+        self.num_joints = max(0, int(num_joints))
+        # joint stored as int; num_joints means "All (full chain)";
+        # 1..num_joints-1 -> root reaches that joint (short cable).
+        self._default = {
+            "gear": self.DEFAULT_GEAR,
+            "ctrl_lo": self.DEFAULT_CTRL_LO,
+            "ctrl_hi": self.DEFAULT_CTRL_HI,
+            "joint": self.num_joints,
+        }
+        self._configs = [dict(self._default) for _ in range(self.num_tendons)]
+        self._current = 0
+
+        self._build_ui()
+        self._load_current()
+        self.section.set_current(self._current)
+
+    def _build_ui(self) -> None:
+        root_layout = QVBoxLayout(self)
+
+        sel_layout = QHBoxLayout()
+        sel_layout.addWidget(QLabel("Tendon:"))
+        self.tendon_combo = QComboBox()
+        for i in range(self.num_tendons):
+            self.tendon_combo.addItem(f"Tendon {i + 1}")
+        sel_layout.addWidget(self.tendon_combo, 1)
+        root_layout.addLayout(sel_layout)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(6)
+        r = 0
+        self.ctrl_lo_spin = QDoubleSpinBox()
+        self._setup_spin(self.ctrl_lo_spin, -100.0, 0.0, 0.1, 2, self._default["ctrl_lo"])
+        self.ctrl_hi_spin = QDoubleSpinBox()
+        self._setup_spin(self.ctrl_hi_spin, 0.0, 100.0, 0.1, 2, self._default["ctrl_hi"])
+        self.gear_spin = QDoubleSpinBox()
+        self._setup_spin(self.gear_spin, 0.0, 10000.0, 1.0, 1, self._default["gear"])
+
+        grid.addWidget(QLabel("Ctrl min"), r, 0)
+        grid.addWidget(self.ctrl_lo_spin, r, 1)
+        r += 1
+        grid.addWidget(QLabel("Ctrl max"), r, 0)
+        grid.addWidget(self.ctrl_hi_spin, r, 1)
+        r += 1
+        grid.addWidget(QLabel("Gear (N)"), r, 0)
+        grid.addWidget(self.gear_spin, r, 1)
+        r += 1
+        grid.addWidget(QLabel("Connect to joint"), r, 0)
+        self.joint_combo = QComboBox()
+        # index 0 = All (root->tip); J1..J(num_joints-1) = root->that joint
+        self.joint_combo.addItem("All (full chain)", self.num_joints)
+        for j in range(1, self.num_joints):
+            self.joint_combo.addItem(f"J{j}", j)
+        grid.addWidget(self.joint_combo, r, 1)
+        grid.setColumnStretch(1, 1)
+
+        content = QHBoxLayout()
+        content.addLayout(grid, 1)
+        self.section = _SectionPreview(self.num_tendons)
+        content.addWidget(self.section)
+        root_layout.addLayout(content)
+
+        btn_layout = QHBoxLayout()
+        self.reset_btn = QPushButton("Reset Defaults")
+        self.reset_btn.clicked.connect(self._reset_current)
+        self.ok_btn = QPushButton("OK")
+        self.ok_btn.clicked.connect(self._on_ok)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.reset_btn)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.ok_btn)
+        root_layout.addLayout(btn_layout)
+
+        self.tendon_combo.currentIndexChanged.connect(self._on_combo_changed)
+
+    def _setup_spin(self, spin, vmin, vmax, step, decimals, value) -> None:
+        spin.setRange(vmin, vmax)
+        spin.setDecimals(decimals)
+        spin.setSingleStep(step)
+        spin.setKeyboardTracking(False)
+        spin.setValue(value)
+        spin.setFixedWidth(120)
+
+    def _save_current(self) -> None:
+        self._configs[self._current] = {
+            "gear": self.gear_spin.value(),
+            "ctrl_lo": self.ctrl_lo_spin.value(),
+            "ctrl_hi": self.ctrl_hi_spin.value(),
+            "joint": self.joint_combo.currentData(),
+        }
+
+    def _load_current(self) -> None:
+        cfg = self._configs[self._current]
+        widgets = (self.gear_spin, self.ctrl_lo_spin, self.ctrl_hi_spin, self.joint_combo)
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            self.gear_spin.setValue(cfg["gear"])
+            self.ctrl_lo_spin.setValue(cfg["ctrl_lo"])
+            self.ctrl_hi_spin.setValue(cfg["ctrl_hi"])
+            idx = 0
+            target = cfg["joint"]
+            if target < self.num_joints:
+                for i in range(self.joint_combo.count()):
+                    if self.joint_combo.itemData(i) == target:
+                        idx = i
+                        break
+            self.joint_combo.setCurrentIndex(idx)
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+
+    def _on_combo_changed(self, _idx: int) -> None:
+        self._save_current()
+        self._current = self.tendon_combo.currentIndex()
+        self._load_current()
+        self.section.set_current(self._current)
+
+    def _reset_current(self) -> None:
+        self._configs[self._current] = dict(self._default)
+        self._load_current()
+
+    def _on_ok(self) -> None:
+        self._save_current()
+        self.accept()
+
+    def get_configs(self) -> list[dict]:
+        return [dict(c) for c in self._configs]
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -344,6 +620,12 @@ class MainWindow(QMainWindow):
         self._has_3d = False
         self._show_cone2_preview = False
         self._vtk_initialized = False
+        # showEvent fires on every taskbar window switch (Windows re-sends it on
+        # re-display). Rebuilding the whole VTK / CadQuery pipeline each time
+        # leaves stale actors that the renderer still references → access
+        # violation (UAF). Only run the heavy init once; later shows just ensure
+        # VTK is ready and let Qt repaint.
+        self._show_initialized = False
         self._camera_initialized = False
         self._extrusion_initialized = False
         self._axes_actor = vtkAxesActor()
@@ -351,6 +633,25 @@ class MainWindow(QMainWindow):
         self._axes_actor.SetShaftTypeToCylinder()
         self._axes_actor.SetCylinderRadius(0.02)
         self._axes_actor.SetAxisLabels(False)
+        # Corner legend: color -> axis (matches vtkAxesActor default colors:
+        # X = red, Y = green, Z = blue). Fixed at the lower-left of the viewport.
+        self._axes_legend = vtkLegendBoxActor()
+        self._axes_legend.SetNumberOfEntries(3)
+        self._axes_legend.SetEntryColor(0, 1.0, 0.0, 0.0)
+        self._axes_legend.SetEntryString(0, "X")
+        self._axes_legend.SetEntryColor(1, 0.0, 1.0, 0.0)
+        self._axes_legend.SetEntryString(1, "Y")
+        self._axes_legend.SetEntryColor(2, 0.0, 0.0, 1.0)
+        self._axes_legend.SetEntryString(2, "Z")
+        self._axes_legend.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        self._axes_legend.GetPositionCoordinate().SetValue(0.02, 0.02, 0.0)
+        self._axes_legend.GetPosition2Coordinate().SetCoordinateSystemToNormalizedViewport()
+        self._axes_legend.GetPosition2Coordinate().SetValue(0.10, 0.14, 0.0)
+        self._axes_legend.SetPadding(5)
+        self._axes_legend.UseBackgroundOff()
+        _legend_tp = self._axes_legend.GetEntryTextProperty()
+        _legend_tp.SetColor(0.15, 0.15, 0.15)
+        _legend_tp.SetFontSize(12)
         self._base_size = 0.0
         self._tip_size = 0.0
         self._taper_angle_deg = 0.0
@@ -563,17 +864,37 @@ class MainWindow(QMainWindow):
             scale=10,
         )
 
+        teardrop_row = QHBoxLayout()
+        teardrop_row.setContentsMargins(0, 0, 0, 0)
+        teardrop_row.setSpacing(8)
+        self.teardrop_check = ToggleSwitch(self.params.teardrop_holes)
+        teardrop_label = QLabel("Teardrop Holes (+Z)")
+        teardrop_row.addWidget(self.teardrop_check)
+        teardrop_row.addWidget(teardrop_label)
+        teardrop_row.addStretch(1)
+        teardrop_wrap = QWidget()
+        teardrop_wrap.setLayout(teardrop_row)
+        form_3d.addWidget(teardrop_wrap, row, 0, 1, 3)
+        row += 1
+
         cable_row = QHBoxLayout()
         cable_row.setContentsMargins(0, 0, 0, 0)
         cable_row.setSpacing(8)
         self.cable_mode_title = QLabel("Num of Cables")
         self.cable2_check = QCheckBox("2")
-        self.cable3_check = QCheckBox("3")
+        self.cable3_check = QCheckBox("N")
         self.cable2_check.setChecked(self.params.two_cable)
         self.cable3_check.setChecked(not self.params.two_cable)
+        self.cable_count_spin = QSpinBox()
+        self.cable_count_spin.setRange(3, 8)
+        self.cable_count_spin.setSingleStep(1)
+        self.cable_count_spin.setKeyboardTracking(False)
+        self.cable_count_spin.setValue(self.params.num_cables)
+        self.cable_count_spin.setFixedWidth(60)
         cable_row.addWidget(self.cable_mode_title)
         cable_row.addWidget(self.cable2_check)
         cable_row.addWidget(self.cable3_check)
+        cable_row.addWidget(self.cable_count_spin)
         cable_row.addStretch(1)
         cable_wrap = QWidget()
         cable_wrap.setLayout(cable_row)
@@ -621,6 +942,11 @@ class MainWindow(QMainWindow):
             self.params.cone_angle2,
             scale=10,
         )
+        self.show_cone_cuts_check = QCheckBox("Show Cone Cuts (yellow)")
+        self.show_cone_cuts_check.setChecked(False)
+        self.show_cone_cuts_check.toggled.connect(self._on_show_cone_cuts_toggled)
+        cable2_layout.addWidget(self.show_cone_cuts_check, cable_row_idx, 0, 1, 3)
+        cable_row_idx += 1
         form_3d.addWidget(self.cable2_wrap, row, 0, 1, 3)
         row += 1
 
@@ -629,7 +955,7 @@ class MainWindow(QMainWindow):
         cable3_layout.setContentsMargins(0, 0, 0, 0)
         cable3_layout.setHorizontalSpacing(8)
         cable3_row_idx = 0
-        self.cable3_cut_check = QCheckBox("Enable 3-cable Cut")
+        self.cable3_cut_check = QCheckBox("Enable Edge Cut")
         self.cable3_cut_check.setChecked(self.params.cable3_cut_enabled)
         cable3_layout.addWidget(self.cable3_cut_check, cable3_row_idx, 0, 1, 3)
         cable3_row_idx += 1
@@ -642,7 +968,7 @@ class MainWindow(QMainWindow):
         self.cable3_cut_pos_spin, self.cable3_cut_pos_slider, cable3_cut_row = self._add_double_control(
             cable3_cut_params_layout,
             cable3_cut_row,
-            "Cut Position (%)",
+            "Cut Start (%)",
             "",
             0.0,
             50.0,
@@ -703,7 +1029,74 @@ class MainWindow(QMainWindow):
             self.params.sim_damping,
             scale=10,
         )
+        self.sim_gravity_spin, self.sim_gravity_slider, sim_row = self._add_double_control(
+            form_sim,
+            sim_row,
+            "Gravity",
+            "m/s^2",
+            0.0,
+            30.0,
+            0.1,
+            2,
+            self.params.gravity,
+            scale=10,
+        )
         panel_layout.addLayout(form_sim)
+
+        # Joint pose is an optional feature: the checkbox lives OUTSIDE the
+        # container so it stays reachable while the section is collapsed.
+        self.pose_check = QCheckBox("Enable Joint Pose")
+        self.pose_check.setChecked(self.params.pose_enabled)
+        panel_layout.addWidget(self.pose_check)
+
+        self.pose_wrap = QWidget()
+        pose_layout = QVBoxLayout(self.pose_wrap)
+        pose_layout.setContentsMargins(0, 0, 0, 0)
+
+        label_pose = QLabel("Joint Pose")
+        label_pose.setStyleSheet("font-weight:600; color:#666;")
+        pose_layout.addWidget(label_pose)
+
+        form_pose = QGridLayout()
+        form_pose.setContentsMargins(0, 0, 0, 0)
+        form_pose.setHorizontalSpacing(8)
+        pose_row = 0
+        self.bend_dir_spin, self.bend_dir_slider, pose_row = self._add_double_control(
+            form_pose,
+            pose_row,
+            "Bend Dir",
+            "(deg)",
+            0.0,
+            360.0,
+            1.0,
+            0,
+            self.params.bend_dir_deg,
+            scale=10,
+        )
+        self.bend_dir_wrap = QWidget()
+        self.bend_dir_wrap.setLayout(form_pose)
+        pose_layout.addWidget(self.bend_dir_wrap)
+
+        self.joint_wrap = QWidget()
+        joint_layout = QVBoxLayout(self.joint_wrap)
+        joint_layout.setContentsMargins(0, 0, 0, 0)
+        self.filler_auto_check = QCheckBox("Auto filler size")
+        self.filler_auto_check.setChecked(self.params.filler_auto)
+        joint_layout.addWidget(self.filler_auto_check)
+        self.joint_selector = QComboBox()
+        joint_layout.addWidget(self.joint_selector)
+        self.joint_stack = QStackedWidget()
+        joint_layout.addWidget(self.joint_stack)
+        self.joint_selector.currentIndexChanged.connect(self.joint_stack.setCurrentIndex)
+        self._joint_spins = []
+        self._joint_filler_widths = []
+        self._joint_filler_heights = []
+        pose_layout.addWidget(self.joint_wrap)
+
+        self.reset_pose_btn = QPushButton("Reset Pose")
+        pose_layout.addWidget(self.reset_pose_btn)
+
+        panel_layout.addWidget(self.pose_wrap)
 
         label_actions = QLabel("Actions")
         label_actions.setStyleSheet("font-weight:600; color:#666;")
@@ -713,6 +1106,9 @@ class MainWindow(QMainWindow):
         panel_layout.addWidget(label_actions)
         self.update_btn = QPushButton("Generate 3D Model")
         panel_layout.addWidget(self.update_btn)
+        self.save_params_btn = QPushButton("Save Parameters")
+        self.save_params_btn.setStyleSheet("QPushButton { background-color: #f0f4e6; } QPushButton:hover { background-color: #e6eed6; }")
+        panel_layout.addWidget(self.save_params_btn)
         self.reset_params_btn = QPushButton("Reset Parameters")
         panel_layout.addWidget(self.reset_params_btn)
         self.reset_view_btn = QPushButton("Reset 3D View")
@@ -765,13 +1161,17 @@ class MainWindow(QMainWindow):
         self._resize_timer.timeout.connect(self._finish_resize)
         self._resizing = False
         self.save_img_btn.clicked.connect(self.save_image)
+        self.save_params_btn.clicked.connect(self._save_params)
         self.reset_params_btn.clicked.connect(self.reset_parameters)
+        self.reset_pose_btn.clicked.connect(self._reset_pose)
         self.export_cad_btn.clicked.connect(self.export_cad)
         self.export_xml_btn.clicked.connect(self.export_xml)
         self.reset_view_btn.clicked.connect(self.reset_view)
         self.cable2_check.toggled.connect(self._on_cable2_checked)
         self.cable3_check.toggled.connect(self._on_cable3_checked)
         self.cable3_cut_check.toggled.connect(self._on_cable3_cut_toggled)
+        self.pose_check.toggled.connect(self._on_pose_toggled)
+        self.filler_auto_check.toggled.connect(self._on_filler_auto_toggled)
         self._on_cable_toggle(self.cable2_check.isChecked())
         for w in (
             self.a_spin,
@@ -804,16 +1204,37 @@ class MainWindow(QMainWindow):
             self.tip_hole_size_slider,
             self.base_hole_pos_slider,
             self.base_hole_size_slider,
+            self.cable_count_spin,
         ):
             w.valueChanged.connect(self.schedule_update)
         self.elastic_check.toggled.connect(lambda _v: self.schedule_update())
+        self.teardrop_check.toggled.connect(lambda _v: self.schedule_update())
 
         self._apply_default_parameters(update_scene=False)
+        self.pose_wrap.setVisible(self.pose_check.isChecked())
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        # Only run the heavy rebuild-once init on the first real show. On later
+        # shows (taskbar window switch, minimize/restore) do NOT reload params or
+        # rebuild the VTK pipeline — that re-creates actors the renderer already
+        # references, freeing them out from under OpenCascade/VTK → access
+        # violation. Just make sure VTK is up; Qt repaints it on its own.
+        if self._show_initialized:
+            self._ensure_vtk_ready()
+            return
+        self._show_initialized = True
         QTimer.singleShot(0, self._apply_splitter_sizes)
+        # Build the model + apply saved params AFTER the first paint. The OpenGL/
+        # VTK init and OCCT model build ran synchronously here before, blocking the
+        # window from rendering and making startup feel very slow. Deferring them
+        # lets the window and all controls appear immediately; the 3D model then
+        # fills in a moment later.
+        QTimer.singleShot(0, self._startup_build)
+
+    def _startup_build(self) -> None:
         self._ensure_vtk_ready()
+        self._load_and_apply_saved_params()
         self.update_scene()
 
     def _apply_splitter_sizes(self) -> None:
@@ -833,7 +1254,9 @@ class MainWindow(QMainWindow):
             interactor = self.vtk_widget.GetRenderWindow().GetInteractor()
             if interactor is not None:
                 interactor.Initialize()
-                interactor.Start()
+                # NOTE: Do NOT call interactor.Start() — it runs a continuous
+                # render loop that conflicts with Qt's event loop and causes lag.
+                # QVTKOpenGLNativeWidget handles rendering via Qt paint events.
                 interactor.SetInteractorStyle(vtkInteractorStyleTrackballCamera())
             self._vtk_initialized = True
             self.vtk_placeholder.setVisible(False)
@@ -845,9 +1268,19 @@ class MainWindow(QMainWindow):
     def schedule_update(self) -> None:
         if self._resizing:
             return
-        self._update_timer.start(120)
-        self._update_cone1_range()
-        self._update_cone2_range()
+        self._update_timer.start(200)
+        # Only update cone ranges when their inputs actually changed
+        ext = float(self.extrusion_spin.value())
+        rlen = self._robot_length
+        if (getattr(self, "_cached_cone1_ext", None) != ext
+                or getattr(self, "_cached_cone1_len", None) != rlen):
+            self._cached_cone1_ext = ext
+            self._cached_cone1_len = rlen
+            self._update_cone1_range()
+        taper = self._taper_angle_deg
+        if getattr(self, "_cached_cone2_taper", None) != taper:
+            self._cached_cone2_taper = taper
+            self._update_cone2_range()
 
     def _on_cable2_checked(self, checked: bool) -> None:
         if checked:
@@ -878,12 +1311,59 @@ class MainWindow(QMainWindow):
         self.cable3_cut_params_wrap.setVisible((not self.params.two_cable) and bool(checked))
         self.schedule_update()
 
+    def _on_pose_toggled(self, checked: bool) -> None:
+        self.params.pose_enabled = bool(checked)
+        self.pose_wrap.setVisible(bool(checked))
+        if not checked:
+            # Disabling the feature cancels the bend: the model goes straight.
+            for s in getattr(self, "_joint_spins", []):
+                s.setValue(0.0)
+        self.update_scene()
+
+    def _on_filler_auto_toggled(self, checked: bool) -> None:
+        self.params.filler_auto = bool(checked)
+        if checked:
+            self._sync_auto_filler_sizes()
+            self.update_scene()
+
+    def _sync_auto_filler_sizes(self) -> None:
+        """Push the auto-derived filler sizes back into the per-joint boxes.
+
+        The boxes are not wired to schedule_update, so setValue() cannot
+        recurse back into this method.
+        """
+        if not getattr(self, "_joint_filler_widths", None):
+            return
+        widths, heights = self._joint_filler_defaults()
+        for box, v in zip(self._joint_filler_widths, widths):
+            box.setValue(v)
+        for box, v in zip(self._joint_filler_heights, heights):
+            box.setValue(v)
+
+    def _on_show_cone_cuts_toggled(self, _checked: bool) -> None:
+        # Only meaningful for the 2-cable model (cone cuts don't exist in 3-cable).
+        # schedule_update refreshes the 2D plots but NOT the 3D preview. Flipping
+        # this checkbox must (re)draw the yellow cut region, so rebuild the scene
+        # directly. In 3-cable mode the toggle has no visible effect and we let the
+        # 2D refresh stand.
+        if self.params.two_cable:
+            self.update_scene()
+        else:
+            self.schedule_update()
+
     def _on_cable_toggle(self, checked: bool) -> None:
         self.params.two_cable = bool(checked)
         self.cable2_wrap.setVisible(checked)
         self.cable3_wrap.setVisible(not checked)
+        self.cable_count_spin.setEnabled(not checked)
         self.cable3_cut_params_wrap.setVisible((not checked) and self.cable3_cut_check.isChecked())
+        if hasattr(self, "bend_dir_wrap"):
+            self.bend_dir_wrap.setVisible(not checked)
         self.update_scene()
+
+    def _cable_angles(self) -> List[float]:
+        n = 2 if self.params.two_cable else max(3, int(self.params.num_cables))
+        return [k * 360.0 / n for k in range(n)]
 
     def _on_splitter_moved(self, *_args) -> None:
         # Pause heavy redraw during drag to avoid ghosting
@@ -899,15 +1379,15 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._resizing = True
+        # Do NOT disable the matplotlib canvases: suppressing their paint events
+        # leaves the 2D plots/panel black until the delayed finish_resize runs,
+        # while the VTK OpenGL view keeps rendering independently (so only the
+        # non-3D areas turn black). Their draw_idle() already throttles redraws.
         self.vtk_widget.setUpdatesEnabled(False)
-        self.polar_canvas.setUpdatesEnabled(False)
-        self.cart_canvas.setUpdatesEnabled(False)
         self._resize_timer.start(120)
 
     def _finish_resize(self) -> None:
         self.vtk_widget.setUpdatesEnabled(True)
-        self.polar_canvas.setUpdatesEnabled(True)
-        self.cart_canvas.setUpdatesEnabled(True)
         self.vtk_widget.GetRenderWindow().Render()
         self.polar_canvas.draw_idle()
         self.cart_canvas.draw_idle()
@@ -993,6 +1473,182 @@ class MainWindow(QMainWindow):
         return box, slider, row + 1
 
         
+    def _params_file_path(self) -> str:
+        return os.path.join(os.path.dirname(__file__), "exports", "last_params.json")
+
+    def _save_params(self) -> None:
+        """Save current parameters to a JSON file."""
+        import json
+
+        out_dir = os.path.join(os.path.dirname(__file__), "exports")
+        os.makedirs(out_dir, exist_ok=True)
+        data = {
+            "a": float(self.a_spin.value()),
+            "b": float(self.b_spin.value()),
+            "dtheta_deg": int(self.dtheta_spin.value()),
+            "theta_max_pi": float(self.theta_max_spin.value()),
+            "p": float(self.p_spin.value()),
+            "elastic_percent": float(self.elastic_spin.value()),
+            "elastic_enabled": self.elastic_check.isChecked(),
+            "extrusion": float(self.extrusion_spin.value()),
+            "cone_angle1": float(self.cone1_spin.value()),
+            "cone_angle2": float(self.cone2_spin.value()),
+            "show_cone_cuts": self.show_cone_cuts_check.isChecked(),
+            "tip_hole_pos": float(self.tip_hole_pos_spin.value()),
+            "tip_hole_size": float(self.tip_hole_size_spin.value()),
+            "base_hole_pos": float(self.base_hole_pos_spin.value()),
+            "base_hole_size": float(self.base_hole_size_spin.value()),
+            "teardrop_holes": self.teardrop_check.isChecked(),
+            "two_cable": self.cable2_check.isChecked(),
+            "num_cables": int(self.cable_count_spin.value()),
+            "cable3_cut_enabled": self.cable3_cut_check.isChecked(),
+            "cable3_cut_pos": float(self.cable3_cut_pos_spin.value()),
+            "cable3_cut_size": float(self.cable3_cut_size_spin.value()),
+            "sim_stiffness": float(self.sim_stiffness_spin.value()),
+            "sim_damping": float(self.sim_damping_spin.value()),
+            "sim_gravity": float(self.sim_gravity_spin.value()),
+            "pose_enabled": self.pose_check.isChecked(),
+            "filler_auto": self.filler_auto_check.isChecked(),
+            "bend_dir_deg": float(self.bend_dir_spin.value()),
+            "joint_angles": [float(s.value()) for s in getattr(self, "_joint_spins", [])],
+            "joint_filler_widths": [float(s.value()) for s in getattr(self, "_joint_filler_widths", [])],
+            "joint_filler_heights": [float(s.value()) for s in getattr(self, "_joint_filler_heights", [])],
+        }
+        with open(self._params_file_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+    def _load_and_apply_saved_params(self) -> bool:
+        """Load saved parameters from JSON and apply to widgets.
+
+        Returns True if saved parameters were loaded successfully.
+        """
+        import json
+
+        params_file = self._params_file_path()
+        if not os.path.isfile(params_file):
+            return False
+        try:
+            with open(params_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return False
+
+        # --- 2D geometry params ---
+        if "a" in data:
+            self.a_spin.setValue(float(data["a"]))
+        if "b" in data:
+            self.b_spin.setValue(float(data["b"]))
+        if "dtheta_deg" in data:
+            self.dtheta_spin.setValue(int(data["dtheta_deg"]))
+        if "theta_max_pi" in data:
+            self.theta_max_spin.setValue(float(data["theta_max_pi"]))
+        if "p" in data:
+            self.p_spin.setValue(float(data["p"]))
+
+        # --- Elastic layer ---
+        if "elastic_enabled" in data:
+            self.elastic_check.setChecked(bool(data["elastic_enabled"]))
+        if "elastic_percent" in data:
+            self.elastic_spin.setValue(float(data["elastic_percent"]))
+
+        # --- Cable mode (before update_2d so toggle state is correct) ---
+        if "two_cable" in data:
+            two = bool(data["two_cable"])
+            self.cable2_check.setChecked(two)
+            self.cable3_check.setChecked(not two)
+            self._on_cable_toggle(two)
+        if "num_cables" in data:
+            self.cable_count_spin.setValue(int(data["num_cables"]))
+
+        # --- Teardrop & cable3 cut ---
+        if "teardrop_holes" in data:
+            self.teardrop_check.setChecked(bool(data["teardrop_holes"]))
+        if "cable3_cut_enabled" in data:
+            self.cable3_cut_check.setChecked(bool(data["cable3_cut_enabled"]))
+            self.cable3_cut_params_wrap.setVisible(
+                (not self.params.two_cable) and bool(data["cable3_cut_enabled"])
+            )
+        if "cable3_cut_pos" in data:
+            self.cable3_cut_pos_spin.setValue(float(data["cable3_cut_pos"]))
+        if "cable3_cut_size" in data:
+            self.cable3_cut_size_spin.setValue(float(data["cable3_cut_size"]))
+
+        # --- Joint pose section (before update_2d so auto filler sizing sees it) ---
+        if "pose_enabled" in data:
+            # Block signals: _startup_build() rebuilds the scene anyway, and the
+            # handler would run a full CAD build against half-restored params.
+            self.pose_check.blockSignals(True)
+            self.pose_check.setChecked(bool(data["pose_enabled"]))
+            self.pose_check.blockSignals(False)
+            self.pose_wrap.setVisible(bool(data["pose_enabled"]))
+        if "filler_auto" in data:
+            self.filler_auto_check.blockSignals(True)
+            self.filler_auto_check.setChecked(bool(data["filler_auto"]))
+            self.filler_auto_check.blockSignals(False)
+
+        # --- update_2d to compute geometry and initialise ranges ---
+        self.update_2d()
+
+        # --- Fabrication params (re-applied after update_2d range init) ---
+        if "extrusion" in data:
+            v = float(data["extrusion"])
+            v = max(self.extrusion_spin.minimum(), min(self.extrusion_spin.maximum(), v))
+            self.extrusion_spin.setValue(v)
+        if "cone_angle1" in data:
+            v = float(data["cone_angle1"])
+            v = max(self.cone1_spin.minimum(), min(self.cone1_spin.maximum(), v))
+            self.cone1_spin.setValue(v)
+        if "cone_angle2" in data:
+            v = float(data["cone_angle2"])
+            v = max(self.cone2_spin.minimum(), min(self.cone2_spin.maximum(), v))
+            self.cone2_spin.setValue(v)
+        if "show_cone_cuts" in data:
+            self.show_cone_cuts_check.setChecked(bool(data["show_cone_cuts"]))
+        if "tip_hole_pos" in data:
+            self.tip_hole_pos_spin.setValue(float(data["tip_hole_pos"]))
+        if "tip_hole_size" in data:
+            self.tip_hole_size_spin.setValue(float(data["tip_hole_size"]))
+        if "base_hole_pos" in data:
+            self.base_hole_pos_spin.setValue(float(data["base_hole_pos"]))
+        if "base_hole_size" in data:
+            self.base_hole_size_spin.setValue(float(data["base_hole_size"]))
+
+        # --- Simulation params ---
+        if "sim_stiffness" in data:
+            self.sim_stiffness_spin.setValue(float(data["sim_stiffness"]))
+        if "sim_damping" in data:
+            self.sim_damping_spin.setValue(float(data["sim_damping"]))
+        if "sim_gravity" in data:
+            self.sim_gravity_spin.setValue(float(data["sim_gravity"]))
+
+        # --- Bend direction ---
+        if "bend_dir_deg" in data:
+            self.bend_dir_spin.setValue(float(data["bend_dir_deg"]))
+
+        # Final update_2d with all params settled
+        self.update_2d()
+
+        # --- Joint angles (restored after update_2d rebuilds controls) ---
+        joint_angles = data.get("joint_angles", [])
+        for i, s in enumerate(getattr(self, "_joint_spins", [])):
+            if i < len(joint_angles):
+                s.setValue(float(joint_angles[i]))
+
+        filler_widths = data.get("joint_filler_widths", [])
+        for i, s in enumerate(getattr(self, "_joint_filler_widths", [])):
+            if i < len(filler_widths):
+                s.setValue(float(filler_widths[i]))
+        filler_heights = data.get("joint_filler_heights", [])
+        for i, s in enumerate(getattr(self, "_joint_filler_heights", [])):
+            if i < len(filler_heights):
+                s.setValue(float(filler_heights[i]))
+
+        return True
+
+    def closeEvent(self, event) -> None:
+        self._save_params()
+        super().closeEvent(event)
+
     def _apply_default_parameters(self, update_scene: bool = True) -> None:
         if hasattr(self, "_cone1_initialized"):
             delattr(self, "_cone1_initialized")
@@ -1011,13 +1667,18 @@ class MainWindow(QMainWindow):
         self.elastic_check.setChecked(defaults.elastic_enabled)
         self.cable2_check.setChecked(defaults.two_cable)
         self.cable3_check.setChecked(not defaults.two_cable)
+        self.cable_count_spin.setValue(defaults.num_cables)
+        self.teardrop_check.setChecked(defaults.teardrop_holes)
         self.cable3_cut_check.setChecked(defaults.cable3_cut_enabled)
         self.cable3_cut_pos_spin.setValue(defaults.cable3_cut_pos)
         self.cable3_cut_size_spin.setValue(defaults.cable3_cut_size)
+        self.bend_dir_spin.setValue(defaults.bend_dir_deg)
+        self.bend_dir_slider.setValue(int(defaults.bend_dir_deg * 10))
         self.cone1_spin.setValue(defaults.cone_angle1)
         self.cone1_slider.setValue(int(defaults.cone_angle1 * 10))
         self.cone2_spin.setValue(defaults.cone_angle2)
         self.cone2_slider.setValue(int(defaults.cone_angle2 * 10))
+        self.show_cone_cuts_check.setChecked(False)
         self.tip_hole_pos_spin.setValue(defaults.tip_hole_pos)
         self.tip_hole_size_spin.setValue(defaults.tip_hole_size)
         self.base_hole_pos_spin.setValue(defaults.base_hole_pos)
@@ -1026,12 +1687,30 @@ class MainWindow(QMainWindow):
         self.sim_stiffness_slider.setValue(int(defaults.sim_stiffness * 1000))
         self.sim_damping_spin.setValue(defaults.sim_damping)
         self.sim_damping_slider.setValue(int(defaults.sim_damping * 1000))
+        self.sim_gravity_spin.setValue(defaults.gravity)
+        self.sim_gravity_slider.setValue(int(defaults.gravity * 10))
+        # Signals blocked: the pose handler would zero the joint spins and run a
+        # CAD build, but the spins/widths/heights are set explicitly below.
+        self.pose_check.blockSignals(True)
+        self.pose_check.setChecked(defaults.pose_enabled)
+        self.pose_check.blockSignals(False)
+        self.pose_wrap.setVisible(defaults.pose_enabled)
+        self.filler_auto_check.blockSignals(True)
+        self.filler_auto_check.setChecked(defaults.filler_auto)
+        self.filler_auto_check.blockSignals(False)
         self._on_cable_toggle(self.cable2_check.isChecked())
         self.update_2d()
         # re-apply cone1 defaults after update_2d range init
         self.cone1_spin.setValue(defaults.cone_angle1)
         self.cone1_slider.setValue(int(defaults.cone_angle1 * 10))
         self.update_2d()
+        for s in self._joint_spins:
+            s.setValue(0.0)
+        default_widths, default_heights = self._joint_filler_defaults()
+        for s, v in zip(getattr(self, "_joint_filler_widths", []), default_widths):
+            s.setValue(v)
+        for s, v in zip(getattr(self, "_joint_filler_heights", []), default_heights):
+            s.setValue(v)
         if update_scene:
             self.update_scene()
 
@@ -1053,8 +1732,11 @@ class MainWindow(QMainWindow):
         self.params.cable3_cut_enabled = self.cable3_cut_check.isChecked()
         self.params.cable3_cut_pos = float(self.cable3_cut_pos_spin.value())
         self.params.cable3_cut_size = float(self.cable3_cut_size_spin.value())
+        self.params.num_cables = max(3, int(self.cable_count_spin.value()))
+        self.params.teardrop_holes = self.teardrop_check.isChecked()
         self.params.sim_stiffness = float(self.sim_stiffness_spin.value())
         self.params.sim_damping = float(self.sim_damping_spin.value())
+        self.params.gravity = float(self.sim_gravity_spin.value())
 
         turns = max(0.1, self.params.theta_max_pi / 2.0)
         theta_vals, r_vals, rc_vals, units_primary, units_mirror, unit_count = _build_polar_units(
@@ -1158,6 +1840,16 @@ class MainWindow(QMainWindow):
         self.length_label.setText(f"Robot Length: {self._robot_length:.2f} mm")
         self.units_label.setText(f"Num of Units: {len(primary)}")
 
+        self.params.bend_dir_deg = float(self.bend_dir_spin.value())
+        if max(0, len(primary) - 1) != len(self._joint_spins):
+            self._rebuild_joint_controls()
+
+        # Keep the per-joint filler sizes tracking the geometry while Auto is on.
+        # update_2d runs before this panel exists during __init__, hence getattr.
+        auto_check = getattr(self, "filler_auto_check", None)
+        if auto_check is not None and auto_check.isChecked():
+            self._sync_auto_filler_sizes()
+
         self._update_cone1_range()
         self._update_cone2_range()
 
@@ -1167,7 +1859,296 @@ class MainWindow(QMainWindow):
         self._draw_polar(theta_vals, r_vals, rc_vals, units_primary, units_mirror, turns)
         self._draw_cartesian(primary, mirror, elastic_poly, elastic_poly_mirror)
 
-    def _build_frustum_solid(self):
+    def _elastic_unit_polys(self):
+        """Split the full-length elastic quad into per-unit quads (+ mirror).
+
+        Returns (polys, mirrors), each a list of len(units) with None where the
+        elastic layer does not cover the unit.
+        """
+        empty = [None] * len(self._polys_primary)
+        if not self._elastic_poly:
+            return empty, empty
+        a, b, c, d = self._elastic_poly  # q0_left, upper_left, upper_right, q1_right
+
+        def interp(p, q, x):
+            if abs(q[0] - p[0]) < 1e-12:
+                return p[1]
+            t = (x - p[0]) / (q[0] - p[0])
+            return p[1] + t * (q[1] - p[1])
+
+        polys: List[List[Point2D] | None] = []
+        mirrors: List[List[Point2D] | None] = []
+        for k in range(len(self._polys_primary)):
+            x0 = max(self._polys_primary[k][3][0], a[0])
+            x1 = min(self._polys_primary[k][2][0], d[0])
+            if x1 - x0 < 1e-9:
+                polys.append(None)
+                mirrors.append(None)
+                continue
+            quad = [
+                (x0, interp(a, d, x0)),
+                (x1, interp(a, d, x1)),
+                (x1, interp(b, c, x1)),
+                (x0, interp(b, c, x0)),
+            ]
+            polys.append(quad)
+            mirrors.append([(x, -y) for x, y in quad])
+        return polys, mirrors
+
+    def _joint_filler_defaults(self):
+        """Default (width, height) per joint for the 2-cable central-axis cylinder.
+
+        Returns two lists in base->tip order (matching the joint control rows).
+
+        Width is the *elastic core's* local diameter, not the rod's: every unit
+        polygon runs from y=0 at both joint planes up to max(y) in the middle,
+        so the revolved body pinches to r=0 at each joint and the only thing
+        spanning the joint is the thin elastic core. Sizing the filler to the
+        unit's outer diameter would make it reach a full radius into both
+        neighbours and swallow them; the core diameter is exactly the gap that
+        opens when the segments rotate about the pivot.
+
+        Height is the rod's Z thickness, read live from the extrusion control.
+        self._thickness is *not* that value -- update_2d sets it to
+        base_size * 0.6 for the sketch drawing, while every CAD path extrudes by
+        the extrusion control, so using it here made the fillers disagree with
+        the body they sit in. The elastic layer also decides *whether* a joint
+        gets a filler; where it is absent the fallback is the rod thickness.
+        """
+        n_joints = max(0, len(self._polys_primary) - 1)
+        thickness = max(0.1, float(self.extrusion_spin.value()))
+        elastic_polys, _elastic_mirror_polys = self._elastic_unit_polys()
+        widths = []
+        heights = []
+        for j in range(n_joints):  # base->tip (UI order)
+            tip_j = n_joints - 1 - j
+            # The joint pivot sits on the axis (y=0), so the quad's |y| is the
+            # core's radius there; the mirrored band gives the same magnitude.
+            covered = tip_j < len(elastic_polys) and elastic_polys[tip_j]
+            if covered:
+                r_core = max(abs(y) for _x, y in elastic_polys[tip_j])
+                widths.append(2.0 * r_core)
+            else:
+                widths.append(thickness)
+            heights.append(thickness)
+        return widths, heights
+
+    def _build_joint_fillers(self, elastic_polys):
+        """Knuckle fillers that keep the elastic rod continuous when bent.
+
+        Bending rotates each elastic segment rigidly about the joint pivot, so
+        adjacent segment end-faces open a wedge gap at every joint. A sphere
+        (N-cable, pivot at rod center) or a cylinder along Z (2-cable, hinge
+        pin) centered at the pivot fills that wedge. The 2-cable cylinder's
+        diameter and Z-height come from the per-joint width/height controls.
+
+        Returns a list aligned with units: entry j fills the joint between
+        unit j and j+1 (built in the straight pose) and must be transformed
+        with the same matrix as unit j. Entries are None where not needed.
+        """
+        try:
+            import cadquery as cq
+        except Exception:
+            return [None] * len(self._polys_primary)
+        n_units = len(self._polys_primary)
+        fillers = [None] * n_units
+        n_joints = n_units - 1
+        widths = getattr(self, "_joint_filler_widths", [])
+        heights = getattr(self, "_joint_filler_heights", [])
+        for j in range(n_joints):
+            eq = elastic_polys[j] if j < len(elastic_polys) else None
+            nq = elastic_polys[j + 1] if j + 1 < len(elastic_polys) else None
+            if not eq or not nq:
+                continue
+            x_e = eq[1][0]  # right edge x of unit j's elastic quad
+            # only fill when the rod actually spans the joint
+            if abs(nq[0][0] - x_e) > 1e-6:
+                continue
+            if self.params.two_cable:
+                # Cylinder along Z (hinge axis). Controls are base->tip while
+                # joint j here is tip->base, so map with n_joints - 1 - j.
+                idx = n_joints - 1 - j
+                width = widths[idx].value() if idx < len(widths) else 0.0
+                height = heights[idx].value() if idx < len(heights) else 0.0
+                if width <= 1e-9 or height <= 1e-9:
+                    continue
+                y_p = self._polys_primary[j][2][1]
+                c = cq.Workplane("XY").circle(width / 2.0).extrude(height / 2.0, both=True)
+                fillers[j] = c.translate((x_e, y_p, 0.0)).val()
+            else:
+                # Same basis as the 2-cable cylinder: the ball plugs the wedge
+                # that opens in the elastic core, so its radius is the core's
+                # radius at the joint -- the units pinch to r=0 there, which
+                # makes the rod's outer radius far too big.
+                r = max(abs(y) for _x, y in eq)
+                if r < 1e-9:
+                    continue
+                s = cq.Workplane("XY").sphere(r)
+                fillers[j] = s.translate((x_e, 0.0, 0.0)).val()
+        return fillers
+
+    @staticmethod
+    def _halfspace_box(origin, normal, extent: float):
+        """Big box occupying the half-space that `normal` points away to."""
+        import cadquery as cq
+        box = cq.Workplane("XY").box(extent, extent, extent, centered=(True, True, True))
+        angle = math.degrees(math.atan2(normal[0], normal[2]))
+        box = box.rotate((0, 0, 0), (0, 1, 0), angle)
+        return box.translate((
+            origin[0] + normal[0] * (extent / 2.0),
+            origin[1] + normal[1] * (extent / 2.0),
+            origin[2] + normal[2] * (extent / 2.0),
+        ))
+
+    def _joint_pose_angles(self) -> List[float]:
+        return [float(s.value()) for s in getattr(self, "_joint_spins", [])]
+
+    def _apply_joint_pose(self, main_units, elastic_units, extra_units=None):
+        """Bend the straight per-unit Shape solids at the joints (serial chain).
+
+        2-cable: hinge about the Z axis through the inner joint edge.
+        N-cable: ball joint on the X axis, bend direction from bend_dir_spin.
+        Each unit gets ONE composed gp_Trsf transform (not per-joint rotates).
+        extra_units: optional unit-aligned list (e.g. joint fillers) transformed
+        with the same per-unit matrices.
+        """
+        angles = self._joint_pose_angles()
+        # CAD builds units from tip (small) to base (large).
+        # Angles come in base-to-tip order → reverse for CAD processing.
+        angles = list(reversed(angles))
+        n_units = len(main_units)
+        if n_units < 2 or len(angles) != n_units - 1:
+            return main_units, elastic_units, extra_units
+        if all(abs(a) < 1e-9 for a in angles):
+            return main_units, elastic_units, extra_units
+
+        import cadquery as cq
+        from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf
+
+        if self.params.two_cable:
+            pts = [
+                [self._polys_primary[j][2][0], self._polys_primary[j][2][1], 0.0]
+                for j in range(n_units - 1)
+            ]
+            dirs = [[0.0, 0.0, 1.0] for _ in range(n_units - 1)]
+        else:
+            beta = math.radians(float(self.bend_dir_spin.value()))
+            pts = [
+                [self._polys_primary[j][2][0], 0.0, 0.0]
+                for j in range(n_units - 1)
+            ]
+            dirs = [[0.0, -math.sin(beta), math.cos(beta)] for _ in range(n_units - 1)]
+
+        mats = [gp_Trsf() for _ in range(n_units)]  # identity
+        for j, ang in enumerate(angles):
+            if abs(ang) < 1e-9:
+                continue
+            pj, dj = pts[j], dirs[j]
+            t = gp_Trsf()
+            t.SetRotation(
+                gp_Ax1(gp_Pnt(pj[0], pj[1], pj[2]), gp_Dir(dj[0], dj[1], dj[2])),
+                math.radians(ang),
+            )
+            for k in range(j + 1, n_units):
+                mats[k] = t.Multiplied(mats[k])
+            # later joint frames move with the tail
+            for jj in range(j + 1, n_units - 1):
+                pts[jj] = list(_rotate_point_about_axis(tuple(pts[jj]), tuple(pj), tuple(dj), ang))
+                dirs[jj] = list(_rodrigues(dirs[jj][0], dirs[jj][1], dirs[jj][2], dj[0], dj[1], dj[2], ang))
+
+        def _tf(s, m):
+            if s is None:
+                return None
+            return s.transformShape(cq.Matrix(m))
+
+        main_out = [_tf(s, mats[k]) for k, s in enumerate(main_units)]
+        elastic_out = [_tf(s, mats[k]) for k, s in enumerate(elastic_units)]
+        extra_out = (
+            [_tf(s, mats[k]) for k, s in enumerate(extra_units)]
+            if extra_units is not None
+            else None
+        )
+        return main_out, elastic_out, extra_out
+
+    def _rebuild_joint_controls(self) -> None:
+        prev = [float(s.value()) for s in getattr(self, "_joint_spins", [])]
+        prev_widths = [float(s.value()) for s in getattr(self, "_joint_filler_widths", [])]
+        prev_heights = [float(s.value()) for s in getattr(self, "_joint_filler_heights", [])]
+        while self.joint_stack.count():
+            page = self.joint_stack.widget(0)
+            self.joint_stack.removeWidget(page)
+            page.deleteLater()
+        self._joint_spins = []
+        self._joint_filler_widths = []
+        self._joint_filler_heights = []
+        n_joints = max(0, len(self._polys_primary) - 1)
+        default_widths, default_heights = self._joint_filler_defaults()
+        size_max = max(float(getattr(self, "_base_size", 1.0)) * 3.0, 1.0)
+        auto = getattr(self, "filler_auto_check", None) is not None and self.filler_auto_check.isChecked()
+
+        self.joint_selector.blockSignals(True)
+        self.joint_selector.clear()
+        for j in range(n_joints):
+            self.joint_selector.addItem(f"J{j + 1}")
+        self.joint_selector.blockSignals(False)
+
+        for j in range(n_joints):
+            # J1 = base joint (largest), J(N-1) = tip joint (smallest)
+            # Controls and _joint_spins are stored base->tip, so index directly
+            # (no reversal) and keep angle/width/height mappings consistent.
+            page = QWidget()
+            grid = QGridLayout(page)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(8)
+
+            value = prev[j] if j < len(prev) else 0.0
+            box, _slider, _row = self._add_double_control(
+                grid, 0, "Angle", "(deg)", -90.0, 90.0, 0.5, 1, value, scale=10
+            )
+            self._joint_spins.append(box)
+
+            # Auto mode always takes the freshly derived geometry; manual mode
+            # preserves whatever the user last typed.
+            w_val = default_widths[j] if auto else (
+                prev_widths[j] if j < len(prev_widths) and prev_widths[j] > 0 else default_widths[j]
+            )
+            h_val = default_heights[j] if auto else (
+                prev_heights[j] if j < len(prev_heights) and prev_heights[j] > 0 else default_heights[j]
+            )
+            # scale=100: the width/height boxes round-trip through their slider
+            # (int(v * scale) in the valueChanged handler), and these two are the
+            # only controls whose values come from the geometry. At scale=10 the
+            # round-trip truncates an auto-derived 0.79 mm to 0.70 mm.
+            wbox, _wsl, _row = self._add_double_control(
+                grid, 1, "Width", "(mm)", 0.0, size_max, 0.1, 2, w_val, scale=100
+            )
+            self._joint_filler_widths.append(wbox)
+            hbox, _hsl, _row = self._add_double_control(
+                grid, 2, "Height", "(mm)", 0.0, size_max, 0.1, 2, h_val, scale=100
+            )
+            self._joint_filler_heights.append(hbox)
+
+            self.joint_stack.addWidget(page)
+
+        if n_joints > 0:
+            self.joint_selector.setCurrentIndex(0)
+            self.joint_stack.setCurrentIndex(0)
+
+    def _reset_pose(self) -> None:
+        for s in getattr(self, "_joint_spins", []):
+            s.setValue(0.0)
+        if hasattr(self, "bend_dir_spin"):
+            self.bend_dir_spin.setValue(0.0)
+
+    def _build_frustum_solid(self, angle_offset: float = 0.0):
+        """Cable hole cutter along the p0->p1 centerline.
+
+        Circular cross-section by default; teardrop cross-section (tip toward
+        global +Z) when params.teardrop_holes is set. angle_offset is the
+        rotation about +X that the caller applies afterwards — the teardrop
+        profile is pre-rotated by -angle_offset so every hole's tip ends up
+        pointing at global +Z.
+        """
         if self._robot_length <= 1e-6:
             return None
         try:
@@ -1189,14 +2170,42 @@ class MainWindow(QMainWindow):
         if length_axis <= 1e-6:
             return None
 
-        # Build frustum around +X axis in XY plane, then revolve around X
-        profile = [(0.0, 0.0), (length_axis, 0.0), (length_axis, base_size * 0.5), (0.0, tip_size * 0.5)]
-        frustum = (
-            cq.Workplane("XY")
-            .polyline(profile)
-            .close()
-            .revolve(360, (0, 0, 0), (1, 0, 0))
-        )
+        if self.params.teardrop_holes:
+            # Teardrop profiles perpendicular to +X (YZ workplane), lofted tip -> base.
+            # Circle radius r with a tangent apex at (0, sqrt(2)*r) pointing +Z.
+            rot = math.radians(angle_offset)
+            c_r, s_r = math.cos(rot), math.sin(rot)
+
+            def td_pts(r: float):
+                t = r / math.sqrt(2.0)
+                apex = r * math.sqrt(2.0)
+                pts = [(t, t), (0.0, -r), (-t, t), (0.0, apex)]
+                return [(y * c_r + z * s_r, -y * s_r + z * c_r) for (y, z) in pts]
+
+            q0 = td_pts(max(0.05, tip_size * 0.5))
+            q1 = td_pts(max(0.05, base_size * 0.5))
+            frustum = (
+                cq.Workplane("YZ")
+                .moveTo(*q0[0])
+                .threePointArc(q0[1], q0[2])
+                .lineTo(*q0[3])
+                .close()
+                .workplane(offset=length_axis)
+                .moveTo(*q1[0])
+                .threePointArc(q1[1], q1[2])
+                .lineTo(*q1[3])
+                .close()
+                .loft(combine=True, ruled=True)
+            )
+        else:
+            # Build frustum around +X axis in XY plane, then revolve around X
+            profile = [(0.0, 0.0), (length_axis, 0.0), (length_axis, base_size * 0.5), (0.0, tip_size * 0.5)]
+            frustum = (
+                cq.Workplane("XY")
+                .polyline(profile)
+                .close()
+                .revolve(360, (0, 0, 0), (1, 0, 0))
+            )
 
         # Rotate frustum so its axis aligns with p0->p1, then translate so (length_axis,0,0) maps to p1
         vx, vy, vz = dx / length_axis, dy / length_axis, dz / length_axis
@@ -1231,6 +2240,28 @@ class MainWindow(QMainWindow):
         tz = p1[2] - end_rot[2]
         frustum = frustum.translate((tx, ty, tz))
         return frustum
+
+    def _build_cable_holes(self, angles: List[float]):
+        """Union of cable-hole cutters at the given rotation angles about +X.
+
+        Each instance is built with angle_offset=ang so teardrop tips stay
+        pointing at global +Z after the rotation. Assembled as a compound
+        (no boolean unions) for speed and robustness.
+        """
+        try:
+            import cadquery as cq
+        except Exception:
+            return None
+        shapes = []
+        for ang in angles:
+            f = self._build_frustum_solid(angle_offset=ang)
+            if f is None:
+                continue
+            inst = f if abs(ang) < 1e-9 else f.rotate((0, 0, 0), (1, 0, 0), ang)
+            shapes.append(inst.val())
+        if not shapes:
+            return None
+        return cq.Workplane("XY").newObject([cq.Compound.makeCompound(shapes)])
 
     def _build_cone2_preview_solid(self):
         if not self.params.two_cable:
@@ -1283,85 +2314,214 @@ class MainWindow(QMainWindow):
         pair_xz = pair_xy.union(rect_xz)
         return pair_xz
 
-    def _build_cable3_extrude_cut_solid(self):
-        if self.params.two_cable or (not self.params.cable3_cut_enabled) or self._robot_length <= 1e-6:
-            return None
+    def _build_cone_cut_regions(self):
+        """Material that cone1/cone2 would actually remove from the uncut body.
+
+        We build the body BEFORE any cutting (extrude every unfolded polygon),
+        then intersect it with each cone cutter. The result is the exact chunk
+        that gets shaved off — what we colour yellow in the preview so the user
+        can see what ConeAngle1 / ConeAngle2 do.
+
+        Returns (region1, region2) as cadquery Shape (or None each): region1 is
+        the cone1 (base-face wedge) piece, region2 is the cone2 (base chamfer)
+        piece. None for both when no cone cuts apply (3-cable or angles == 0).
+        """
+        if not self.params.two_cable:
+            return None, None
         try:
             import cadquery as cq
         except Exception:
-            return None
+            return None, None
+        if self._robot_length <= 1e-6 or not self._polys_primary:
+            return None, None
 
-        # a1 is Cut Position(%) ratio: controls extrude-cut location.
-        a1 = max(0.0, min(0.50, float(self.cable3_cut_pos_spin.value()) / 100.0))
-        p0 = (0.0, -(1.0 - a1) * self._tip_size * 0.5)
-        p1 = (self._robot_length, -(1.0 - a1) * self._base_size * 0.5)
-        p2 = (self._robot_length, -self._base_size)
-        p3 = (0.0, -self._tip_size)
+        thickness = max(0.1, float(self.extrusion_spin.value()))
 
-        cut_depth = max(0.1, 2.0 * self._base_size)
-        base_cut = cq.Workplane("XY").polyline([p0, p1, p2, p3]).close().extrude(cut_depth, both=True)
+        # --- Uncut body: fuse every extruded unit (primary + mirror), no cutters.
+        pieces = []
+        for k in range(len(self._polys_primary)):
+            wp = (
+                cq.Workplane("XY")
+                .polyline(self._polys_primary[k])
+                .close()
+                .extrude(thickness / 2.0, both=True)
+            )
+            if k < len(self._polys_mirror) and self._polys_mirror[k]:
+                wm = (
+                    cq.Workplane("XY")
+                    .polyline(self._polys_mirror[k])
+                    .close()
+                    .extrude(thickness / 2.0, both=True)
+                )
+                wp = wp.union(wm)
+            pieces.append(wp.val())
+        if not pieces:
+            return None, None
+        body = pieces[0]
+        for p in pieces[1:]:
+            try:
+                body = body.fuse(p)
+            except Exception:
+                pass
 
-        cuts = None
-        for ang in (0.0, 120.0, 240.0):
-            inst = base_cut if ang == 0.0 else base_cut.rotate((0, 0, 0), (1, 0, 0), ang)
-            cuts = inst if cuts is None else cuts.union(inst)
-        return cuts
+        # --- Cone1 wedge: two half-space clippers at the base face (same as CAD).
+        region1 = None
+        cone1 = float(self.cone1_spin.value())
+        if self._robot_length > 1e-6 and cone1 > 1e-6:
+            alpha = -math.radians(cone1 * 0.5)
+            base_x = max(x for poly in self._polys_primary for x, _y in poly)
+            half_z = thickness * 0.5
+            extent = max(self._robot_length, self._base_size, thickness) * 10.0
+            n1 = (math.sin(alpha), 0.0, math.cos(alpha))
+            n2 = (math.sin(alpha), 0.0, -math.cos(alpha))
+            for box in (
+                self._halfspace_box((base_x, 0.0, half_z), n1, extent),
+                self._halfspace_box((base_x, 0.0, -half_z), n2, extent),
+            ):
+                try:
+                    r = body.intersect(box.val())
+                except Exception:
+                    r = None
+                if r is not None and not r.isNull():
+                    region1 = r if region1 is None else region1.fuse(r)
 
-    def _build_cable3_cone_cut_solid(self):
-        if self.params.two_cable or (not self.params.cable3_cut_enabled) or self._robot_length <= 1e-6:
-            return None
-        try:
-            import cadquery as cq
-        except Exception:
-            return None
+        # --- Cone2 chamfer: the rotated base solid intersected with the body.
+        region2 = None
+        cone2_solid = self._build_cone2_preview_solid()
+        if cone2_solid is not None:
+            cs = cone2_solid.val()
+            if cs is not None and not cs.isNull():
+                try:
+                    r = body.intersect(cs)
+                except Exception:
+                    r = None
+                if r is not None and not r.isNull():
+                    region2 = r
 
-        # a2 is Cut Size(%) ratio: controls cone-cut size.
-        a2 = max(0.0, min(0.20, float(self.cable3_cut_size_spin.value()) / 100.0))
-        # Placement follows the same centerline from a1 (Cut Position).
-        a1 = max(0.0, min(0.50, float(self.cable3_cut_pos_spin.value()) / 100.0))
-
-        # Build pp1/pp2, then extend their line toward negative x to hit y=0 at pp0.
-        pp1 = (0.0, a2 * self._tip_size)
-        pp2 = (self._robot_length, a2 * self._base_size)
-        pp3 = (self._robot_length, 0.0)
-        dy = pp2[1] - pp1[1]
-        if abs(dy) <= 1e-9:
-            pp0_x = -self._robot_length
-        else:
-            pp0_x = -pp1[1] * self._robot_length / dy
-        pp0 = (pp0_x, 0.0)
-
-        # Revolved cutter now uses a triangle profile: pp0-pp2-pp3.
-        base_cone = (
-            cq.Workplane("XY")
-            .polyline([pp0, pp2, pp3])
-            .close()
-            .revolve(360.0, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0))
-        )
-
-        p0 = (0.0, -(1.0 - a1) * self._tip_size * 0.5, 0.0)
-        p1 = (self._robot_length, -(1.0 - a1) * self._base_size * 0.5, 0.0)
-        theta_deg = math.degrees(math.atan2(p1[1] - p0[1], p1[0] - p0[0]))
-
-        aligned = base_cone.rotate((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), theta_deg)
-        x3_rot = self._robot_length * math.cos(math.radians(theta_deg))
-        y3_rot = self._robot_length * math.sin(math.radians(theta_deg))
-        aligned = aligned.translate((p1[0] - x3_rot, p1[1] - y3_rot, p1[2]))
-
-        cuts = None
-        for ang in (0.0, 120.0, 240.0):
-            inst = aligned if ang == 0.0 else aligned.rotate((0, 0, 0), (1, 0, 0), ang)
-            cuts = inst if cuts is None else cuts.union(inst)
-        return cuts
+        return region1, region2
 
     def _build_cable3_cut_solid(self):
-        extrude_cuts = self._build_cable3_extrude_cut_solid()
-        cone_cuts = self._build_cable3_cone_cut_solid()
-        if extrude_cuts is None:
-            return cone_cuts
-        if cone_cuts is None:
-            return extrude_cuts
-        return extrude_cuts.union(cone_cuts)
+        """Flat edge cuts between adjacent cable holes (weight reduction).
+
+        Cross-section is shaved towards the inscribed regular N-gon:
+        - Cut Position (%) = axial start of the cut (0 = full length, 50 = base half)
+        - Cut Size (%)     = cut depth (0 = none, 20 = full inscribed N-gon)
+        The apothem is clamped so flats never intersect the cable holes.
+        """
+        if self.params.two_cable or (not self.params.cable3_cut_enabled) or self._robot_length <= 1e-6:
+            return None
+        try:
+            import cadquery as cq
+        except Exception:
+            return None
+
+        n = max(3, int(self.params.num_cables))
+        L = self._robot_length
+        tip_r = max(1e-6, self._tip_size * 0.5)
+        base_r = max(1e-6, self._base_size * 0.5)
+
+        a1 = max(0.0, min(0.50, float(self.cable3_cut_pos_spin.value()) / 100.0))
+        a2 = max(0.0, min(0.20, float(self.cable3_cut_size_spin.value()) / 100.0))
+        if a2 <= 1e-9:
+            return None
+        x_start = 2.0 * a1 * L
+        if x_start >= L - 1e-6:
+            return None
+
+        cos_step = math.cos(math.pi / n)
+        depth_frac = a2 / 0.20  # 0..1 -> none .. inscribed N-gon
+
+        def body_r(x: float) -> float:
+            return tip_r + (base_r - tip_r) * (x / L)
+
+        # Cable-hole centerline radius / hole radius along x (matches _build_frustum_solid)
+        tip_pos = max(0.0, min(1.0, float(self.tip_hole_pos_spin.value()) / 100.0))
+        base_pos = max(0.0, min(1.0, float(self.base_hole_pos_spin.value()) / 100.0))
+        tip_hole_r = float(self.tip_hole_size_spin.value()) * 0.5
+        base_hole_r = float(self.base_hole_size_spin.value()) * 0.5
+        # Teardrop apex extends sqrt(2)*r from the hole center
+        hole_extent = math.sqrt(2.0) if (hasattr(self, "teardrop_check") and self.teardrop_check.isChecked()) else 1.0
+        rho0, rho1 = tip_pos * tip_r, base_pos * base_r
+
+        hole_margin = 0.3  # mm, keep a wall around each cable hole
+
+        def apothem(x: float) -> float:
+            h_want = body_r(x) * (1.0 - depth_frac * (1.0 - cos_step))
+            h_safe = (rho0 + (rho1 - rho0) * (x / L)) * cos_step \
+                + (tip_hole_r + (base_hole_r - tip_hole_r) * (x / L)) * hole_extent + hole_margin
+            return min(body_r(x), max(h_want, h_safe))
+
+        h0 = apothem(x_start)
+        h1 = apothem(L)
+        slope = (h1 - h0) / (L - x_start)
+
+        # Half-space beyond the tilted plane y = h0 + slope*(x - x_start), normal in XY plane
+        nx, ny = -slope, 1.0
+        norm = math.hypot(nx, ny)
+        nx, ny = nx / norm, ny / norm
+        extent = max(L, base_r, tip_r) * 10.0
+
+        plane_box = cq.Workplane("XY").box(extent, extent, extent, centered=(True, True, True))
+        gamma = math.degrees(math.atan2(-nx, ny))  # rotate +y onto the plane normal
+        plane_box = plane_box.rotate((0, 0, 0), (0, 0, 1), gamma)
+        plane_box = plane_box.translate((
+            x_start + nx * (extent / 2.0),
+            h0 + ny * (extent / 2.0),
+            0.0,
+        ))
+
+        # Limit the cut to x in [x_start, L + margin]
+        x_len = (L * 1.1) - x_start
+        slab = cq.Workplane("XY").box(x_len, extent, extent, centered=(True, True, True))
+        slab = slab.translate((x_start + x_len / 2.0, 0.0, 0.0))
+
+        cutter0 = plane_box.intersect(slab)
+
+        shapes = []
+        for k in range(n):
+            phi = (k + 0.5) * 360.0 / n  # flats sit between adjacent cable holes
+            inst = cutter0.rotate((0, 0, 0), (1, 0, 0), phi)
+            shapes.append(inst.val())
+        return cq.Workplane("XY").newObject([cq.Compound.makeCompound(shapes)])
+
+    def _export_stl_single_threaded(self, shape, path: str, tolerance: float) -> bool:
+        """Export a CadQuery Shape/Workplane to binary STL, meshing single-threaded.
+
+        OCCT's default STL path meshes in parallel (`BRepMesh_IncrementalMesh`
+        with parallel=True). Once VTK's OpenGL context is loaded into the same
+        process (the 3D preview), one of those background meshing threads hits
+        an access violation — a native library interaction unrelated to the
+        geometry (the same shape meshes fine without VTK). Meshing on the
+        calling thread (parallel=False) avoids it entirely.
+        """
+        import cadquery as cq
+        from OCP.BRepMesh import BRepMesh_IncrementalMesh
+        from OCP.StlAPI import StlAPI_Writer
+        s = shape
+        if isinstance(s, cq.Workplane):
+            s = s.val()
+        wrapped = s.wrapped
+        # relative=False: `tolerance` is an absolute deflection in mm (the value
+        # comes from _stl_mesh_tolerance). Note: it does NOT change the resulting
+        # file size much — the body is mostly flat per-unit quad faces that always
+        # triangulate to ~2 triangles regardless of deflection, and the few curved
+        # faces (elastic frustum, cone) hit the 0.1 rad angular cap first.
+        BRepMesh_IncrementalMesh(wrapped, tolerance, False, 0.1, False)
+        writer = StlAPI_Writer()
+        return bool(writer.Write(wrapped, path))
+
+    def _stl_mesh_tolerance(self) -> float:
+        """STL tessellation deflection (mm) sized to the model.
+
+        Scaled to the body so surface accuracy is roughly constant across models
+        (a 300 mm body gets ~0.09 mm, a small one gets finer). The value is an
+        absolute mm deflection, NOT a ratio — see the call site in
+        _export_stl_single_threaded. This controls accuracy, not mesh size; the
+        size is dominated by the flat per-unit faces, so a few tens of MB binary
+        STL is expected and later halved by vtkDecimatePro in the preview.
+        """
+        length = max(1.0, float(getattr(self, "_robot_length", 1.0)))
+        return max(0.05, length * 0.0003)
 
     def update_scene(self) -> None:
         # Heavy 3D rebuild on demand
@@ -1374,18 +2534,23 @@ class MainWindow(QMainWindow):
         main_solid, elastic_solid = parts
         if main_solid is None:
             return
-        solid = main_solid if elastic_solid is None else main_solid.union(elastic_solid)
-        if solid is None:
+        try:
+            import cadquery as cq
+        except Exception:
             self.vtk_placeholder.setText("3D Preview unavailable (CadQuery not ready)")
             self.vtk_placeholder.setVisible(True)
             return
+        solid_shapes = [main_solid.val()]
+        if elastic_solid is not None:
+            solid_shapes.append(elastic_solid.val())
+        solid = cq.Compound.makeCompound(solid_shapes)
 
         out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
         preview_path = os.path.join(out_dir, "preview_live.stl")
         try:
-            import cadquery as cq
-            cq.exporters.export(solid.val(), preview_path)
+            if not self._export_stl_single_threaded(solid, preview_path, self._stl_mesh_tolerance()):
+                raise RuntimeError("OCCT STL write returned failure")
         except Exception as exc:
             self.vtk_placeholder.setText(f"3D Preview export failed: {exc}")
             self.vtk_placeholder.setVisible(True)
@@ -1395,8 +2560,17 @@ class MainWindow(QMainWindow):
         reader.SetFileName(preview_path)
         reader.Update()
         poly = reader.GetOutput()
+        # Thin out the mesh before rendering: a ~7.7 MB STL (hundreds of
+        # thousands of triangles) plus edge rendering over-stresses an Intel
+        # iGPU and triggers a Windows display-driver TDR (black screen + crash).
+        # Halve the triangle count (visual difference is negligible).
+        decimate = vtkDecimatePro()
+        decimate.SetInputData(poly)
+        decimate.SetTargetReduction(0.5)
+        decimate.PreserveTopologyOn()
+        decimate.Update()
         normals = vtkPolyDataNormals()
-        normals.SetInputData(poly)
+        normals.SetInputData(decimate.GetOutput())
         normals.ConsistencyOn()
         normals.AutoOrientNormalsOn()
         normals.SplittingOff()
@@ -1416,13 +2590,14 @@ class MainWindow(QMainWindow):
         actor.GetProperty().SetAmbient(0.35)
         actor.GetProperty().SetDiffuse(0.65)
         actor.GetProperty().SetSpecular(0.1)
-        actor.GetProperty().SetInterpolationToPhong()
+        actor.GetProperty().SetInterpolationToFlat()
         self.renderer.RemoveAllViewProps()
         self.renderer.AddActor(actor)
 
         # Debug: show x1/y1 and x2/y2 intersection points as small spheres
+        posed = any(abs(a) > 1e-9 for a in self._joint_pose_angles())
         site_points = None
-        if self._polys_primary:
+        if self._polys_primary and not posed:
             last_poly = self._polys_primary[-1]
             if len(last_poly) >= 4:
                 p0_line = (0.0, self.params.tip_hole_pos * self._tip_size * 0.5)
@@ -1476,8 +2651,8 @@ class MainWindow(QMainWindow):
 
         frustum_poly = None
         frustum_path = os.path.join(out_dir, "frustum_live.stl")
-        frustum_solid = self._build_frustum_solid()
-        if frustum_solid is not None:
+        frustum_solid = None if posed else self._build_frustum_solid()
+        if frustum_solid is not None and not self.params.teardrop_holes:
             try:
                 import cadquery as cq
                 cq.exporters.export(frustum_solid.val(), frustum_path)
@@ -1499,11 +2674,48 @@ class MainWindow(QMainWindow):
             f_triangulate.Update()
             f_mapper = vtkPolyDataMapper()
             f_mapper.SetInputData(f_triangulate.GetOutput())
-            if self.params.two_cable:
-                angles = [0.0, 180.0]
-            else:
-                angles = [0.0, 120.0, 240.0]
+            angles = self._cable_angles()
             for ang in angles:
+                f_actor = vtkActor()
+                f_actor.SetMapper(f_mapper)
+                f_actor.GetProperty().SetColor(1.0, 0.55, 0.2)
+                f_actor.GetProperty().SetOpacity(0.5)
+                f_actor.GetProperty().EdgeVisibilityOn()
+                f_actor.GetProperty().SetEdgeColor(0.85, 0.4, 0.15)
+                f_actor.GetProperty().BackfaceCullingOff()
+                if abs(ang) > 1e-6:
+                    t = vtkTransform()
+                    t.RotateWXYZ(ang, 1.0, 0.0, 0.0)
+                    f_actor.SetUserTransform(t)
+                self.renderer.AddActor(f_actor)
+        elif self.params.teardrop_holes and not posed:
+            # Teardrop tips must stay at global +Z: build one solid per angle
+            # (pre-rotated by -ang) instead of reusing a single mapper.
+            for idx, ang in enumerate(self._cable_angles()):
+                f_solid = self._build_frustum_solid(angle_offset=ang)
+                if f_solid is None:
+                    continue
+                f_path = os.path.join(out_dir, f"frustum_live_{idx}.stl")
+                try:
+                    import cadquery as cq
+                    cq.exporters.export(f_solid.val(), f_path)
+                    f_reader = vtkSTLReader()
+                    f_reader.SetFileName(f_path)
+                    f_reader.Update()
+                    f_poly = f_reader.GetOutput()
+                except Exception:
+                    continue
+                f_normals = vtkPolyDataNormals()
+                f_normals.SetInputData(f_poly)
+                f_normals.ConsistencyOn()
+                f_normals.AutoOrientNormalsOn()
+                f_normals.SplittingOff()
+                f_normals.Update()
+                f_triangulate = vtkTriangleFilter()
+                f_triangulate.SetInputData(f_normals.GetOutput())
+                f_triangulate.Update()
+                f_mapper = vtkPolyDataMapper()
+                f_mapper.SetInputData(f_triangulate.GetOutput())
                 f_actor = vtkActor()
                 f_actor.SetMapper(f_mapper)
                 f_actor.GetProperty().SetColor(1.0, 0.55, 0.2)
@@ -1522,8 +2734,8 @@ class MainWindow(QMainWindow):
         cone2_solid = self._build_cone2_preview_solid()
         if cone2_solid is not None:
             try:
-                import cadquery as cq
-                cq.exporters.export(cone2_solid.val(), cone2_path)
+                if not self._export_stl_single_threaded(cone2_solid, cone2_path, self._stl_mesh_tolerance()):
+                    raise RuntimeError("OCCT STL write returned failure")
                 c_reader = vtkSTLReader()
                 c_reader.SetFileName(cone2_path)
                 c_reader.Update()
@@ -1552,7 +2764,67 @@ class MainWindow(QMainWindow):
             c_actor.GetProperty().BackfaceCullingOff()
             self.renderer.AddActor(c_actor)
 
+        # Yellow highlight of the exact material cone1/cone2 would remove.
+        # Reuse the already-exported live STL shape as the "uncut" reference so we
+        # don't need a separate boolean pass on the geometry; if no cone cuts, skip.
+        if (
+            getattr(self, "show_cone_cuts_check", None) is not None
+            and self.show_cone_cuts_check.isChecked()
+        ):
+            try:
+                region1, region2 = self._build_cone_cut_regions()
+            except Exception:
+                region1 = region2 = None
+            for region, tint in ((region1, (0.95, 0.55, 0.05)), (region2, (0.55, 0.8, 0.05))):
+                if region is None:
+                    continue
+                # region is a cadquery Shape; wrap + write to a temp STL.
+                try:
+                    import cadquery as cq
+                    r_path = os.path.join(out_dir, "cone_cut_region.stl")
+                    cq.exporters.export(cq.Workplane("XY").newObject([region]), r_path)
+                except Exception:
+                    continue
+                try:
+                    r_reader = vtkSTLReader()
+                    r_reader.SetFileName(r_path)
+                    r_reader.Update()
+                    r_poly = r_reader.GetOutput()
+                    r_normals = vtkPolyDataNormals()
+                    r_normals.SetInputData(r_poly)
+                    r_normals.ConsistencyOn()
+                    r_normals.AutoOrientNormalsOn()
+                    r_normals.SplittingOff()
+                    r_normals.Update()
+                    r_tri = vtkTriangleFilter()
+                    r_tri.SetInputData(r_normals.GetOutput())
+                    r_tri.Update()
+                    r_map = vtkPolyDataMapper()
+                    r_map.SetInputData(r_tri.GetOutput())
+                    r_act = vtkActor()
+                    r_act.SetMapper(r_map)
+                    r_act.GetProperty().SetColor(*tint)
+                    r_act.GetProperty().SetOpacity(0.6)
+                    r_act.GetProperty().EdgeVisibilityOn()
+                    r_act.GetProperty().SetEdgeColor(0.0, 0.0, 0.0)
+                    r_act.GetProperty().BackfaceCullingOff()
+                    self.renderer.AddActor(r_act)
+                except Exception:
+                    pass
+
+        # Place the coordinate axes at the base (bottom) joint's end-face center
+        # (x=_robot_length) instead of the model tip, and orient them to match the
+        # cross-section XY plane used at XML export so tendon positions read the same
+        # here as in the exported model. The export frame is
+        # translate(-robot_length,0,0) then rotate(+90 deg about Y), which maps:
+        #   XML X = CAD Z (thickness), XML Y = CAD Y (width), XML Z = -CAD X (chain).
+        # Rotating the triad -90 deg about Y aligns its Z with the chain (base->tip)
+        # and its X/Y with the cross-section, matching that export XY plane.
+        self._axes_actor.SetPosition(self._robot_length, 0.0, 0.0)
+        self._axes_actor.SetOrientation(0.0, -90.0, 0.0)
         self.renderer.AddActor(self._axes_actor)
+        if hasattr(self, "_axes_legend"):
+            self.renderer.AddActor(self._axes_legend)
         if not self._camera_initialized:
             self.renderer.ResetCamera()
             self._camera_initialized = True
@@ -1692,6 +2964,9 @@ class MainWindow(QMainWindow):
                 linewidth=0.6,
             )
         ax.grid(True, alpha=0.3)
+        # Limit radial ticks for faster rendering
+        if ax.get_rmax() > 0:
+            ax.set_rticks([ax.get_rmax() * 0.5, ax.get_rmax()])
 
     def _draw_cartesian(
         self,
@@ -1893,17 +3168,36 @@ class MainWindow(QMainWindow):
             import cadquery as cq
         except Exception:
             return
+        self._save_params()
         self.params.sim_stiffness = float(self.sim_stiffness_spin.value())
         self.params.sim_damping = float(self.sim_damping_spin.value())
+        self.params.gravity = float(self.sim_gravity_spin.value())
         out_dir = os.path.join(os.path.dirname(__file__), "exports")
         os.makedirs(out_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        xml_dir = os.path.join(out_dir, f"xml_{ts}")
-        os.makedirs(xml_dir, exist_ok=True)
 
         # Build only the rightmost unit without elastic layer
         if not self._polys_primary:
             return
+        num_units = max(1, len(self._polys_primary))
+        cable_mode = (2 if self.params.two_cable else max(3, int(self.params.num_cables)))
+
+        # Ask the user for per-tendon settings before exporting.
+        dlg = TendonConfigDialog(
+            num_tendons=cable_mode,
+            num_joints=max(0, num_units - 1),
+            parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        tendon_configs = dlg.get_configs()
+
+        # Only create the per-export folder after the user confirms with OK, so
+        # closing the dialog without exporting leaves no empty xml_<ts> folder
+        # behind (and the timestamp reflects when the export actually started).
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        xml_dir = os.path.join(out_dir, f"xml_{ts}")
+        os.makedirs(xml_dir, exist_ok=True)
+
         if self.params.two_cable:
             thickness = max(0.1, float(self.extrusion_spin.value()))
             solid = None
@@ -1964,14 +3258,9 @@ class MainWindow(QMainWindow):
                 return
 
             # Apply frustum holes for 3-cable unit
-            frustum = self._build_frustum_solid()
-            if frustum is not None:
-                holes = None
-                for ang in (0.0, 120.0, 240.0):
-                    inst = frustum if ang == 0.0 else frustum.rotate((0, 0, 0), (1, 0, 0), ang)
-                    holes = inst if holes is None else holes.union(inst)
-                if holes is not None:
-                    solid = solid.cut(holes)
+            holes = self._build_cable_holes(self._cable_angles())
+            if holes is not None:
+                solid = solid.cut(holes)
 
             # Apply additional 3-cable manufacturing cuts
             cable3_cut = self._build_cable3_cut_solid()
@@ -2035,8 +3324,9 @@ class MainWindow(QMainWindow):
                         y2 = p0_line[1] + slope * (x2 - p0_line[0])
                     site_points = (x1, y1, x2, y2)
         gamma = math.exp(self.params.b * math.radians(self.params.dtheta_deg))
-        num_units = max(1, len(self._polys_primary))
         joint_type = "hinge" if self.params.two_cable else "ball"
+        joint_angles = self._joint_pose_angles()
+        bend_dir = float(self.bend_dir_spin.value())
         from xml_generator import generate_mujoco_xml
         try:
             generate_mujoco_xml(
@@ -2049,9 +3339,14 @@ class MainWindow(QMainWindow):
                 joint_limit_deg=self.params.dtheta_deg,
                 robot_length=self._robot_length,
                 site_points=site_points,
-                cable_mode=3 if not self.params.two_cable else 2,
+                cable_mode=cable_mode,
                 joint_stiffness=self.params.sim_stiffness,
                 joint_damping=self.params.sim_damping,
+                gravity=self.params.gravity,
+                joint_angles=joint_angles,
+                bend_dir_deg=bend_dir,
+                extrusion_depth=(thickness if self.params.two_cable else 0.0),
+                tendon_configs=tendon_configs,
             )
         except Exception as exc:
             print(f"[Export XML] failed: {exc}")
@@ -2062,6 +3357,7 @@ class MainWindow(QMainWindow):
             import cadquery as cq
         except Exception:
             return
+        self._save_params()
         parts = self._build_cad_parts()
         if parts is None:
             return
@@ -2078,8 +3374,10 @@ class MainWindow(QMainWindow):
             solids.append(elastic_solid.val())
         step_compound = cq.Compound.makeCompound(solids)
         cq.exporters.export(step_compound, step_path)
-        merged = main_solid if elastic_solid is None else main_solid.union(elastic_solid)
-        cq.exporters.export(merged.val(), stl_path)
+        # STL: mesh single-threaded (parallel=False). With VTK's OpenGL context
+        # loaded, OCCT's default parallel meshing trips an access violation; a
+        # size-scaled tolerance also keeps the file a sensible size.
+        self._export_stl_single_threaded(step_compound, stl_path, self._stl_mesh_tolerance())
 
     def _build_cad_parts(self):
         try:
@@ -2087,128 +3385,257 @@ class MainWindow(QMainWindow):
         except Exception:
             return None
 
+        n_units = len(self._polys_primary)
+        if n_units == 0:
+            return None
+        elastic_polys, elastic_mirror_polys = self._elastic_unit_polys()
+
+        def _shape_of(obj):
+            return None if obj is None else obj.val()
+
+        def _wrap(shapes):
+            shapes = [s for s in shapes if s is not None and not s.isNull()]
+            if not shapes:
+                return None
+            return cq.Workplane("XY").newObject([cq.Compound.makeCompound(shapes)])
+
+        def _bbox_overlap(a, b, tol=1e-6):
+            ba, bb = a.BoundingBox(), b.BoundingBox()
+            return (
+                ba.xmin <= bb.xmax + tol and ba.xmax >= bb.xmin - tol
+                and ba.ymin <= bb.ymax + tol and ba.ymax >= bb.ymin - tol
+                and ba.zmin <= bb.zmax + tol and ba.zmax >= bb.zmin - tol
+            )
+
+        def _iter_cutters(cutters):
+            for c in cutters:
+                cs = _shape_of(c)
+                if cs is not None and not cs.isNull():
+                    yield cs
+
+        def _cut_per_unit(shapes, cutters):
+            # Posed path: cut each unit, skipping cutters whose bbox misses it.
+            tools = list(_iter_cutters(cutters))
+            if not tools:
+                return shapes
+            out = []
+            for s in shapes:
+                if s is None:
+                    out.append(None)
+                    continue
+                for cs in tools:
+                    if not _bbox_overlap(s, cs):
+                        continue
+                    try:
+                        s2 = s.cut(cs)
+                        if s2 is not None and not s2.isNull():
+                            s = s2
+                    except Exception:
+                        pass
+                out.append(s)
+            return out
+
+        def _cut_global(shapes, cutters):
+            # Straight path: assemble once, then one boolean per cutter.
+            shapes = [s for s in shapes if s is not None and not s.isNull()]
+            if not shapes:
+                return None
+            comp = cq.Compound.makeCompound(shapes)
+            for cs in _iter_cutters(cutters):
+                try:
+                    comp2 = comp.cut(cs)
+                    if comp2 is not None and not comp2.isNull():
+                        comp = comp2
+                except Exception:
+                    pass
+            return comp
+
+        posed = any(abs(a) > 1e-9 for a in self._joint_pose_angles())
+
         if self.params.two_cable:
             thickness = max(0.1, float(self.extrusion_spin.value()))
 
-            main = None
-            for poly in (self._polys_primary + self._polys_mirror):
-                wp = cq.Workplane("XY").polyline(poly).close().extrude(thickness / 2.0, both=True)
-                main = wp if main is None else main.union(wp)
+            main_units = []
+            for k in range(n_units):
+                wp = cq.Workplane("XY").polyline(self._polys_primary[k]).close().extrude(thickness / 2.0, both=True)
+                if k < len(self._polys_mirror) and self._polys_mirror[k]:
+                    wm = cq.Workplane("XY").polyline(self._polys_mirror[k]).close().extrude(thickness / 2.0, both=True)
+                    wp = wp.union(wm)
+                main_units.append(wp.val())
 
-            elastic = None
-            if self._elastic_poly:
-                wp = cq.Workplane("XY").polyline(self._elastic_poly).close().extrude(thickness / 2.0, both=True)
-                elastic = wp if elastic is None else elastic.union(wp)
-            if self._elastic_poly_mirror:
-                wp = cq.Workplane("XY").polyline(self._elastic_poly_mirror).close().extrude(thickness / 2.0, both=True)
-                elastic = wp if elastic is None else elastic.union(wp)
-            if main is None:
-                return None
-            # Apply cone1 clipping to CAD export
+            elastic_units = []
+            for k in range(n_units):
+                eu = None
+                if elastic_polys[k]:
+                    eu = cq.Workplane("XY").polyline(elastic_polys[k]).close().extrude(thickness / 2.0, both=True)
+                    if elastic_mirror_polys[k]:
+                        eum = cq.Workplane("XY").polyline(elastic_mirror_polys[k]).close().extrude(thickness / 2.0, both=True)
+                        eu = eu.union(eum)
+                elastic_units.append(None if eu is None else eu.val())
+
+            # Cone1 clipping half-spaces (same planes as before)
+            cone_boxes = []
             cone1 = float(self.cone1_spin.value())
             if self._robot_length > 1e-6 and cone1 > 1e-6:
                 alpha = -math.radians(cone1 * 0.5)
-                # Use actual model bounds for base_x to avoid offset errors
-                try:
-                    base_x = main.val().BoundingBox().xmax
-                except Exception:
-                    base_x = self._robot_length
+                base_x = max(x for poly in self._polys_primary for x, _y in poly)
                 half_z = thickness * 0.5
                 extent = max(self._robot_length, self._base_size, thickness) * 10.0
-
-                # Same two planes as 3D preview
                 n1 = (math.sin(alpha), 0.0, math.cos(alpha))
                 n2 = (math.sin(alpha), 0.0, -math.cos(alpha))
+                cone_boxes = [
+                    self._halfspace_box((base_x, 0.0, half_z), n1, extent),
+                    self._halfspace_box((base_x, 0.0, -half_z), n2, extent),
+                ]
 
-                def _cut_halfspace(workpiece, origin, normal):
-                    # Build a large box and remove the side pointed by normal
-                    box = cq.Workplane("XY").box(extent, extent, extent, centered=(True, True, True))
-                    angle = math.degrees(math.atan2(normal[0], normal[2]))
-                    box = box.rotate((0, 0, 0), (0, 1, 0), angle)
-                    box = box.translate((
-                        origin[0] + normal[0] * (extent / 2.0),
-                        origin[1] + normal[1] * (extent / 2.0),
-                        origin[2] + normal[2] * (extent / 2.0),
-                    ))
-                    return workpiece.cut(box)
-
-                main = _cut_halfspace(main, (base_x, 0.0, half_z), n1)
-                main = _cut_halfspace(main, (base_x, 0.0, -half_z), n2)
-                if elastic is not None:
-                    elastic = _cut_halfspace(elastic, (base_x, 0.0, half_z), n1)
-                    elastic = _cut_halfspace(elastic, (base_x, 0.0, -half_z), n2)
-
-            frustum = self._build_frustum_solid()
-            if frustum is not None:
-                angles = [0.0, 180.0]
-                holes = None
-                for ang in angles:
-                    inst = frustum if ang == 0.0 else frustum.rotate((0, 0, 0), (1, 0, 0), ang)
-                    holes = inst if holes is None else holes.union(inst)
-                if holes is not None:
-                    main = main.cut(holes)
-                    if elastic is not None:
-                        elastic = elastic.cut(holes)
-
+            frustum = self._build_cable_holes([0.0, 180.0])
             cone2_solid = self._build_cone2_preview_solid()
-            if cone2_solid is not None:
-                main = main.cut(cone2_solid)
-                if elastic is not None:
-                    elastic = elastic.cut(cone2_solid)
+            cutters = cone_boxes + [frustum, cone2_solid]
 
+            if posed:
+                main_units = _cut_per_unit(main_units, cutters)
+                elastic_units = _cut_per_unit(elastic_units, cutters)
+                fillers = self._build_joint_fillers(elastic_polys)
+                # Same cutters as the units: an auto-sized filler spans the local
+                # diameter, so it would otherwise poke through the cone faces.
+                fillers = _cut_per_unit(fillers, cutters)
+                main_units, elastic_units, fillers = self._apply_joint_pose(
+                    main_units, elastic_units, fillers
+                )
+                main = _wrap(main_units)
+                elastic = _wrap(elastic_units + (fillers or []))
+            else:
+                main = _wrap([_cut_global(main_units, cutters)])
+                elastic = _wrap([_cut_global(elastic_units, cutters)])
+            if main is None:
+                return None
             return (main, elastic)
 
-        main = None
-        for poly in self._polys_primary:
+        main_units = []
+        for k in range(n_units):
             wp = (
                 cq.Workplane("XY")
-                .polyline(poly)
+                .polyline(self._polys_primary[k])
                 .close()
                 .revolve(360, (0, 0, 0), (1, 0, 0))
             )
-            main = wp if main is None else main.union(wp)
+            main_units.append(wp.val())
 
-        elastic = None
-        if self._elastic_poly:
-            wp = (
-                cq.Workplane("XY")
-                .polyline(self._elastic_poly)
-                .close()
-                .revolve(360, (0, 0, 0), (1, 0, 0))
+        elastic_units = []
+        for k in range(n_units):
+            eu = None
+            if elastic_polys[k]:
+                eu = (
+                    cq.Workplane("XY")
+                    .polyline(elastic_polys[k])
+                    .close()
+                    .revolve(360, (0, 0, 0), (1, 0, 0))
+                )
+            elastic_units.append(None if eu is None else eu.val())
+
+        frustum = self._build_cable_holes(self._cable_angles())
+        cable3_cut = self._build_cable3_cut_solid()
+        cutters = [frustum, cable3_cut]
+
+        if posed:
+            main_units = _cut_per_unit(main_units, cutters)
+            elastic_units = _cut_per_unit(elastic_units, cutters)
+            fillers = self._build_joint_fillers(elastic_polys)
+            fillers = _cut_per_unit(fillers, cutters)
+            main_units, elastic_units, fillers = self._apply_joint_pose(
+                main_units, elastic_units, fillers
             )
-            elastic = wp if elastic is None else elastic.union(wp)
-
+            main = _wrap(main_units)
+            elastic = _wrap(elastic_units + (fillers or []))
+        else:
+            main = _wrap([_cut_global(main_units, cutters)])
+            elastic = _wrap([_cut_global(elastic_units, cutters)])
         if main is None:
             return None
-
-        frustum = self._build_frustum_solid()
-        if frustum is not None:
-            angles = [0.0, 120.0, 240.0]
-            holes = None
-            for ang in angles:
-                inst = frustum if ang == 0.0 else frustum.rotate((0, 0, 0), (1, 0, 0), ang)
-                holes = inst if holes is None else holes.union(inst)
-            if holes is not None:
-                main = main.cut(holes)
-                if elastic is not None:
-                    elastic = elastic.cut(holes)
-
-
-        cable3_cut = self._build_cable3_cut_solid()
-        if cable3_cut is not None:
-            main = main.cut(cable3_cut)
-            if elastic is not None:
-                elastic = elastic.cut(cable3_cut)
         return (main, elastic)
 
 
+def _hide_gl_symbol_warnings() -> None:
+    """Silence cosmetic OpenGL-loader noise ("Symbol '<glX>' is not defined").
+
+    When the app runs on a virtual display (e.g. Sunlogin's Oray Indirect
+    Display Driver) or any surface that can't provide a hardware desktop-OpenGL
+    context, Windows falls back to the software "GDI Generic" OpenGL 1.1
+    renderer. That ICD lacks every modern GL entry point, so the loader prints
+    one "Symbol '<glX>' is not defined" line per missing function (six of them
+    appear right after startup). They are harmless — the preview just renders in
+    software — but they clutter the terminal.
+
+    We redirect the process stdout/stderr through a daemon reader that forwards
+    every line unchanged EXCEPT ones matching this specific "symbol ... is not
+    defined" pattern. Real output is preserved; in particular Python
+    NameError tracebacks ("name '...' is not defined") do NOT contain "symbol"
+    so they are never dropped. Non-Windows platforms are untouched.
+    """
+    if os.name != "nt" or getattr(sys, "_gl_warn_filter_on", False):
+        return
+    sys._gl_warn_filter_on = True
+    import threading
+
+    def _is_gl_loader_line(line: bytes) -> bool:
+        lower = line.lower()
+        return b"symbol" in lower and b"not defined" in lower
+
+    def _filter_stream(src_fd: int, keep_fd: int) -> None:
+        read_fd, write_fd = os.pipe()
+        os.dup2(write_fd, src_fd)
+        os.close(write_fd)
+
+        def _reader() -> None:
+            buf = b""
+            while True:
+                try:
+                    chunk = os.read(read_fd, 4096)
+                except OSError:
+                    return
+                if not chunk:
+                    break
+                buf += chunk
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if _is_gl_loader_line(line):
+                        continue
+                    os.write(keep_fd, line + b"\n")
+            if buf and not _is_gl_loader_line(buf):
+                os.write(keep_fd, buf)
+
+        threading.Thread(target=_reader, daemon=True).start()
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # Duplicate the real fds as the forwarding target BEFORE hijacking them.
+    _filter_stream(1, os.dup(1))
+    _filter_stream(2, os.dup(2))
+
+
 def main() -> None:
+    # Loading the desktop-OpenGL ICD over a virtual display prints benign
+    # "Symbol ... is not defined" lines; drop just those so the console is clean.
+    _hide_gl_symbol_warnings()
+
+    # Native crashes (segfault / OpenGL driver crash) cannot be caught by
+    # try/except, so dump the C+Python call stack to exports/crash.log instead.
+    import faulthandler
+    crash_log = os.path.join(os.path.dirname(__file__), "exports", "crash.log")
+    try:
+        os.makedirs(os.path.dirname(crash_log), exist_ok=True)
+        faulthandler.enable(open(crash_log, "a", encoding="utf-8"))
+    except Exception:
+        faulthandler.enable()
+
     QApplication.setAttribute(Qt.AA_UseDesktopOpenGL, True)
     QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
     fmt = QSurfaceFormat()
     fmt.setRenderableType(QSurfaceFormat.OpenGL)
-    fmt.setVersion(3, 2)
-    fmt.setProfile(QSurfaceFormat.CoreProfile)
+    # Avoid forcing a fixed 3.2 Core profile: on Intel iGPUs a hard-coded core
+    # OpenGL context is a known trigger for the VTK preview to black-screen and
+    # crash after repeated Generate calls. Let Qt/VTK negotiate a compatible
+    # context instead.
     fmt.setDepthBufferSize(24)
     fmt.setStencilBufferSize(8)
     fmt.setSamples(0)

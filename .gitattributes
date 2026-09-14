@@ -1,0 +1,15 @@
+# Normalize line endings to LF in the repository.
+# Without this, core.autocrlf=true on Windows makes every file look modified.
+* text=auto eol=lf
+
+# Binary assets: never convert line endings, never diff.
+*.stl   binary
+*.step  binary
+*.stp   binary
+*.obj   binary
+*.msh   binary
+*.3mf   binary
+*.zip   binary
+*.png   binary
+*.pdf   binary
+*.mp4   binary
