@@ -117,6 +117,11 @@ npm run serve        # or: npx openspirobs-web --port 5180
 ```
 
 `dist/` uses relative paths, so it can be served from any sub-path (GitHub Pages included).
+
+`.github/workflows/web.yml` tests and builds the app on every pull request that
+touches `web/`, and on pushes to `main` publishes `dist/` to GitHub Pages at
+https://zhanchiwang.github.io/Open-Spiral-Robots/. Pages has to be switched on
+once in the repository settings: Settings → Pages → Source: **GitHub Actions**.
 The first visit downloads ~10 MB (gzip) of WebAssembly; browsers cache it afterwards.
 
 ## Tests

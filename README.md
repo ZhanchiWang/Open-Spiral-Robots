@@ -26,7 +26,7 @@ If you use OpenSpiRobs in academic work, please cite this repository:
 - Please add the WeChat ID above to join the OpenSpiRobs WeChat group.
 
 ## Web version
-The design tool also runs in the browser — 2D sketch, 3D CAD with STEP/STL export, MuJoCo XML export and an in-browser MuJoCo simulation for debugging, with no Python install:
+The design tool also runs in the browser — 2D sketch, 3D CAD with STEP/STL export, MuJoCo XML export and an in-browser MuJoCo simulation for debugging, with no Python install. Online: https://zhanchiwang.github.io/Open-Spiral-Robots/ (published by GitHub Pages from `main`). Locally:
 
 ```bash
 cd web && npm install && npm run dev
