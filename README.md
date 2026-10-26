@@ -25,8 +25,18 @@ If you use OpenSpiRobs in academic work, please cite this repository:
 - WeChat: spirobs
 - Please add the WeChat ID above to join the OpenSpiRobs WeChat group.
 
+## Web version
+The design tool also runs in the browser — 2D sketch, 3D CAD with STEP/STL export, MuJoCo XML export and an in-browser MuJoCo simulation for debugging, with no Python install:
+
+```bash
+cd web && npm install && npm run dev
+```
+
+See `web/README.md`.
+
 ## Structure
 - `design-tool/` — Python GUI design tool (primary)
+- `web/` — browser version of the design tool (npm / Vite)
 - `hardware/` — hardware CAD/STEP/STL (optional)
 - `fabrication/` — fabrication/assembly notes (optional)
 - `datasets/` — datasets/models (optional)
