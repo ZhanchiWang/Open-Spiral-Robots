@@ -98,9 +98,20 @@ export function frustumSolid(ctx: CadContext, angleOffset = 0): Shape3D | null {
   if (design.length <= 1e-6) return null;
   const tipPos = params.tip_hole_pos / 100;
   const basePos = params.base_hole_pos / 100;
-  const y0 = Math.max(0, Math.min(1, tipPos)) * (design.tipSize * 0.5);
+  let y0 = Math.max(0, Math.min(1, tipPos)) * (design.tipSize * 0.5);
   const y1 = Math.max(0, Math.min(1, basePos)) * (design.baseSize * 0.5);
-  const p0: V3 = [0, y0, 0];
+  let tipR = params.tip_hole_size * 0.5;
+  const baseRh = params.base_hole_size * 0.5;
+  // For small Δθ the tip unit reaches behind x = 0 (its angle at q0 is over
+  // 90°): start the cutter there, on the same line and taper, so the hole
+  // stays open at the tip.
+  const tipMinX = Math.min(0, ...design.primary[0].map((q) => q[0]));
+  const ext = tipMinX < 0 ? -tipMinX + Math.max(params.tip_hole_size, 0.1) : 0;
+  if (ext > 0) {
+    y0 -= ((y1 - y0) * ext) / design.length;
+    tipR = Math.max(1e-3, tipR - ((baseRh - tipR) * ext) / design.length);
+  }
+  const p0: V3 = [-ext, y0, 0];
   const p1: V3 = [design.length, y1, 0];
   const dx = p1[0] - p0[0];
   const dy = p1[1] - p0[1];
@@ -121,16 +132,16 @@ export function frustumSolid(ctx: CadContext, angleOffset = 0): Shape3D | null {
     };
     const sketch = (q: Pt[], offset: number) =>
       draw(q[0]).threePointsArcTo(q[2], q[1]).lineTo(q[3]).close().sketchOnPlane("YZ", offset);
-    const q0 = td(Math.max(0.05, params.tip_hole_size * 0.5));
-    const q1 = td(Math.max(0.05, params.base_hole_size * 0.5));
+    const q0 = td(Math.max(0.05, tipR));
+    const q1 = td(Math.max(0.05, baseRh));
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     frustum = (sketch(q0, 0) as any).loftWith(sketch(q1, lengthAxis), { ruled: true }) as Shape3D;
   } else {
     const profile: Poly = [
       [0, 0],
       [lengthAxis, 0],
-      [lengthAxis, params.base_hole_size * 0.5],
-      [0, params.tip_hole_size * 0.5],
+      [lengthAxis, baseRh],
+      [0, tipR],
     ];
     const s = revolveX(profile);
     if (!s) return null;
@@ -263,12 +274,23 @@ export function cable3CutSolid(ctx: CadContext): Shape3D | null {
   const xLen = L * 1.1 - xStart;
   const slab = centeredBox(xLen, extent, extent).translate(xStart + xLen / 2, 0, 0);
   const cutter0 = planeBox.intersect(slab);
-  const shapes: Shape3D[] = [];
+  // With 5+ cables neighbouring flats overlap, and OCCT's cut with a compound
+  // of overlapping tools leaves fragments: fuse the flats into one tool first.
+  let tool: Shape3D | null = null;
   for (let k = 0; k < n; k++) {
     const phi = ((k + 0.5) * 360) / n;
-    shapes.push(cutter0.clone().rotate(phi, [0, 0, 0], [1, 0, 0]));
+    const flat = cutter0.clone().rotate(phi, [0, 0, 0], [1, 0, 0]);
+    if (!tool) {
+      tool = flat;
+      continue;
+    }
+    const fused: Shape3D = tool.fuse(flat);
+    tool.delete();
+    flat.delete();
+    tool = fused;
   }
-  return compound(shapes);
+  cutter0.delete();
+  return tool;
 }
 
 /** _build_joint_fillers: knuckle fillers aligned with units (tip -> base). */

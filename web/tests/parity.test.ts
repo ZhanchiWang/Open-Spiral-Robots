@@ -104,7 +104,7 @@ describe("formatting and params", () => {
     expect(p.a).toBe(1e4);
     expect(p.sim_stiffness).toBe(168); // scaled designs keep their physics
     expect(p.b).toBe(defaultParams().b);
-    expect(p.dtheta_deg).toBe(13);
+    expect(p.dtheta_deg).toBe(12); // Python int() truncates
     expect(p.num_cables).toBe(8);
   });
 });

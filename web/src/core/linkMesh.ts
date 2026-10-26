@@ -29,6 +29,51 @@ function convexHull(points: Pt[]): Pt[] {
   return lower.slice(0, -1).concat(upper.slice(0, -1)); // counter-clockwise
 }
 
+/**
+ * Cross-section of a 2-cable unit: the unit and its mirror image share the
+ * edge on the centre line, so the outline is the hexagon a b c b' a' d. It is
+ * not convex when the unit's angle at d is over 90° (small Δθ), which a convex
+ * hull would wrongly fill in. Returned counter-clockwise.
+ */
+function twoCableOutline(unit: Pt[], mirror: Pt[]): Pt[] {
+  const out: Pt[] = [unit[0], unit[1], unit[2], mirror[1], mirror[0], unit[3]];
+  let area = 0;
+  for (let i = 0; i < out.length; i++) {
+    const p = out[i];
+    const q = out[(i + 1) % out.length];
+    area += p[0] * q[1] - q[0] * p[1];
+  }
+  return area < 0 ? out.reverse() : out;
+}
+
+/** Ear-clipping triangulation of a simple counter-clockwise polygon. */
+function triangulate(poly: Pt[]): [number, number, number][] {
+  const idx = poly.map((_, i) => i);
+  const tris: [number, number, number][] = [];
+  const cross = (o: Pt, a: Pt, b: Pt) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const inside = (p: Pt, a: Pt, b: Pt, c: Pt) => cross(a, b, p) > 0 && cross(b, c, p) > 0 && cross(c, a, p) > 0;
+  let guard = 0;
+  while (idx.length > 3 && guard++ < 10000) {
+    let clipped = false;
+    for (let k = 0; k < idx.length; k++) {
+      const i0 = idx[(k + idx.length - 1) % idx.length];
+      const i1 = idx[k];
+      const i2 = idx[(k + 1) % idx.length];
+      const [a, b, c] = [poly[i0], poly[i1], poly[i2]];
+      if (cross(a, b, c) <= 1e-12) continue; // reflex or degenerate corner
+      if (idx.some((j) => j !== i0 && j !== i1 && j !== i2 && inside(poly[j], a, b, c))) continue;
+      tris.push([i0, i1, i2]);
+      idx.splice(k, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) break;
+  }
+  // whatever is left (degenerate slivers) as a fan
+  for (let i = 1; i + 1 < idx.length; i++) tris.push([idx[0], idx[i], idx[i + 1]]);
+  return tris;
+}
+
 /** CAD (x along the chain, y width, z thickness) -> XML frame. */
 const toXml = (L: number, x: number, y: number, z: number): [number, number, number] => [z, y, L - x];
 
@@ -45,14 +90,14 @@ export function baseLinkMesh(design: Design, params: Params, segments = 40): Lin
 
   if (params.two_cable) {
     const mirror = design.mirror[design.mirror.length - 1];
-    const outline = convexHull([...last, ...mirror]);
+    const outline = twoCableOutline(last, mirror);
     const t = Math.max(0.1, params.extrusion) / 2;
     const n = outline.length;
     const top = outline.map(([x, y]) => add(x, y, t));
     const bot = outline.map(([x, y]) => add(x, y, -t));
-    for (let i = 1; i + 1 < n; i++) {
-      tris.push(top[0], top[i], top[i + 1]);
-      tris.push(bot[0], bot[i + 1], bot[i]);
+    for (const [i, j, k] of triangulate(outline)) {
+      tris.push(top[i], top[j], top[k]);
+      tris.push(bot[i], bot[k], bot[j]);
     }
     for (let i = 0; i < n; i++) {
       const j = (i + 1) % n;
@@ -126,7 +171,7 @@ function chamferCorners(poly: Pt[], c: number, keep: (p: Pt) => boolean = () => 
   return out;
 }
 
-/** Offset a counter-clockwise convex polygon inwards by `d`. */
+/** Offset a counter-clockwise simple polygon inwards by `d` (small d). */
 function inset(poly: Pt[], d: number): Pt[] {
   const n = poly.length;
   const lines = poly.map((p, i) => {
@@ -167,7 +212,7 @@ export function renderLinkMesh(design: Design, params: Params, segments = 48): L
     const mirror = design.mirror[design.mirror.length - 1];
     const t = Math.max(0.1, params.extrusion) / 2;
     const c = Math.max(1e-4, 0.1 * Math.min(unitH, 2 * t));
-    const outer = chamferCorners(convexHull([...last, ...mirror]), c * 1.4);
+    const outer = chamferCorners(twoCableOutline(last, mirror), c * 1.4);
     const inner = inset(outer, c);
     const ring = (poly: Pt[], z: number) => poly.map(([x, y]) => add(x, y, z));
     const top = ring(inner, t);
@@ -175,9 +220,9 @@ export function renderLinkMesh(design: Design, params: Params, segments = 48): L
     const lower = ring(outer, -t + c);
     const bot = ring(inner, -t);
     const n = outer.length;
-    for (let i = 1; i + 1 < n; i++) {
-      tris.push(top[0], top[i], top[i + 1]);
-      tris.push(bot[0], bot[i + 1], bot[i]);
+    for (const [i, j, k] of triangulate(inner)) {
+      tris.push(top[i], top[j], top[k]);
+      tris.push(bot[i], bot[k], bot[j]);
     }
     const band = (a: number[], b: number[]) => {
       for (let i = 0; i < n; i++) {

@@ -3,6 +3,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import loadMujoco from "@mujoco/mujoco";
 import { baseLinkMesh, meshVolume, renderLinkMesh } from "../src/core/linkMesh";
+import { Recorder } from "../src/showcase/physics";
 import { defaultParams, type Params } from "../src/core/params";
 import { scaleParams } from "../src/core/scaling";
 import { resolve } from "../src/core/state";
@@ -130,5 +131,67 @@ describe("live physics", () => {
     ph.setActivation(a);
     ph.advance(0.5, 1e9);
     expect(Number.isFinite(ph.curl)).toBe(true);
+  });
+});
+
+describe("regressions", () => {
+  const area = (poly: number[][]) => Math.abs(poly.reduce((s, p, i) => s + p[0] * poly[(i + 1) % poly.length][1] - poly[(i + 1) % poly.length][0] * p[1], 0)) / 2;
+
+  it("2-cable mesh follows the real outline for small Δθ (no filled V-notch)", () => {
+    for (const dt of [30, 15, 5]) {
+      const { params, design } = resolve({ ...defaultParams(), dtheta_deg: dt });
+      const last = design!.primary[design!.primary.length - 1];
+      const m = baseLinkMesh(design!, params);
+      expect(meshVolume(m) / (2 * area(last) * params.extrusion)).toBeCloseTo(1, 6);
+      const r = meshVolume(renderLinkMesh(design!, params)) / meshVolume(m);
+      expect(r).toBeGreaterThan(0.85);
+      expect(r).toBeLessThanOrEqual(1.0001);
+    }
+  });
+
+  it("cables added after a size change get the scaled gear", () => {
+    const small = resolve(scaleParams(resolve(defaultParams()).params, 8 / 464)).params;
+    const six = resolve({ ...small, two_cable: false, num_cables: 6 }).params;
+    const g = six.tendon_configs!.map((c) => c.gear);
+    expect(g).toHaveLength(6);
+    for (const x of g) expect(x).toBeCloseTo(g[0], 12);
+    expect(g[0]).toBeCloseTo(50 * (8 / 464) ** 2, 9);
+  });
+
+  it("an empty control range or negative gear never reaches MuJoCo", () => {
+    const p = resolve({ ...defaultParams(), tendon_configs: [{ gear: -5, ctrl_lo: 0, ctrl_hi: 0, joint: 99 }] }).params;
+    expect(p.tendon_configs![0].gear).toBe(0);
+    expect(p.tendon_configs![0].ctrl_hi).toBeGreaterThan(p.tendon_configs![0].ctrl_lo);
+  });
+
+  it("recorder: times already overwritten are reported as missing", () => {
+    const r = new Recorder();
+    r.reset(1);
+    const N = 30000; // more than the capacity
+    for (let i = 0; i < N; i++) r.push(i * 1e-3, 0, 0, [0, 0, 0], [0]);
+    expect(r.find(0)).toBe(-1);
+    expect(r.time(r.find((N - 1) * 1e-3))).toBeCloseTo((N - 1) * 1e-3, 9);
+    const fresh = new Recorder();
+    fresh.reset(1);
+    fresh.push(1e-3, 0, 0, [0, 0, 0], [0]);
+    expect(fresh.find(0)).toBe(0); // unwrapped: t = 0 maps to the first sample
+  });
+
+  it("a MuJoCo auto-reset is reported, not left as a limp robot", () => {
+    const base = resolve(defaultParams()).params;
+    const strong = { ...base, tendon_configs: base.tendon_configs!.map((c, i) => ({ ...c, gear: i === 0 ? 50 * 3365 : c.gear })) };
+    const { ph } = physicsFor(strong);
+    ph.snapActivation([1, 0]);
+    let err = "";
+    for (let i = 0; i < 300 && !err; i++) {
+      try {
+        ph.advance(0.01, 1e9);
+      } catch (e) {
+        err = (e as Error).message;
+      }
+    }
+    expect(err).toMatch(/diverged/);
+    expect(ph.target.every((a) => a === 0)).toBe(true);
+    expect(ph.rec.count).toBe(0);
   });
 });

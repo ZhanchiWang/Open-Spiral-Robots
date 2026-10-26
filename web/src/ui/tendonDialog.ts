@@ -64,14 +64,16 @@ export function editTendons(initial: TendonConfig[], nJoints: number, title = "T
       sectionHost.replaceChildren(sectionSvg(cfgs.length, current));
     };
     const save = () => {
-      const clampN = (v: string, a: number, b: number, d: number) => {
-        const x = Number(v);
-        return Number.isFinite(x) ? Math.max(a, Math.min(b, x)) : d;
+      // an emptied field keeps its previous value (Number("") would be 0)
+      const clampN = (v: string, a: number, b: number, prev: number) => {
+        const x = v.trim() === "" ? NaN : Number(v);
+        return Number.isFinite(x) ? Math.max(a, Math.min(b, x)) : prev;
       };
+      const c = cfgs[current];
       cfgs[current] = {
-        ctrl_lo: clampN(lo.value, -100, 0, DEFAULT_TENDON.ctrl_lo),
-        ctrl_hi: clampN(hi.value, 0, 100, DEFAULT_TENDON.ctrl_hi),
-        gear: clampN(gear.value, 0, 10000, DEFAULT_TENDON.gear),
+        ctrl_lo: clampN(lo.value, -100, 0, c.ctrl_lo),
+        ctrl_hi: clampN(hi.value, 0, 100, c.ctrl_hi),
+        gear: clampN(gear.value, 0, 10000, c.gear),
         joint: Number(joint.value),
       };
     };

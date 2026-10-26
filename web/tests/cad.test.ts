@@ -1,7 +1,7 @@
 // CAD smoke test on the real OpenCascade build (slow: loads a 23 MB wasm).
 import { beforeAll, describe, expect, it } from "vitest";
 import opencascade from "replicad-opencascadejs";
-import { makeCompound, measureVolume, setOC, type Shape3D } from "replicad";
+import { makeBox, makeCompound, measureVolume, setOC, type Shape3D } from "replicad";
 import { baselinkSolid, buildParts, coneCutRegions, makeContext } from "../src/cad/cad";
 import { defaultParams, type Params } from "../src/core/params";
 import { resolve } from "../src/core/state";
@@ -39,6 +39,9 @@ const CASES: Record<keyof typeof expected, Partial<Params> & { posed?: boolean }
   "4cable_teardrop": { two_cable: false, theta_max_pi: 4, num_cables: 4, teardrop_holes: true },
   "2cable_posed": { theta_max_pi: 3.6, posed: true },
   "3cable_posed": { two_cable: false, theta_max_pi: 3.6, bend_dir_deg: 30, posed: true },
+  "6cable": { two_cable: false, theta_max_pi: 4, num_cables: 6 },
+  "2cable_dtheta15": { theta_max_pi: 4, dtheta_deg: 15 },
+  "3cable_dtheta15": { two_cable: false, theta_max_pi: 4, dtheta_deg: 15 },
 };
 
 describe("CAD volumes match CadQuery", () => {
@@ -73,5 +76,34 @@ describe("CAD exports", () => {
     expect(step).toContain("ISO-10303-21");
     const [r1, r2] = coneCutRegions(ctxFor({ show_cone_cuts: true, theta_max_pi: 3 }));
     expect(vol(r1) + vol(r2)).toBeGreaterThan(0);
+  }, 120_000);
+});
+
+describe("CAD regressions", () => {
+  it("5+ cables: the flat cuts give one clean base link", () => {
+    const four = v(baselinkSolid(ctxFor({ two_cable: false, theta_max_pi: 4, num_cables: 4 })));
+    for (const n of [5, 6, 8]) {
+      const s = baselinkSolid(ctxFor({ two_cable: false, theta_max_pi: 4, num_cables: n }));
+      expect(s!.solids.length).toBe(1);
+      // more cables shave less (flats get narrower): never less than 4 cables
+      expect(v(s)).toBeGreaterThan(four * 0.95);
+    }
+  }, 120_000);
+
+  it("small Δθ: the cable holes stay open at the tip", () => {
+    const tiny = (s: Shape3D, p: [number, number, number]) => {
+      const e = 0.01;
+      return measureVolume(s.intersect(makeBox([p[0] - e, p[1] - e, p[2] - e], [p[0] + e, p[1] + e, p[2] + e])));
+    };
+    for (const two of [true, false]) {
+      const ctx = ctxFor({ two_cable: two, dtheta_deg: 15, theta_max_pi: 4 });
+      const d = ctx.design;
+      const tipMinX = Math.min(...d.primary[0].map((q) => q[0]));
+      expect(tipMinX).toBeLessThan(0); // the case the fix is about
+      const y0 = (Math.max(0, Math.min(1, ctx.params.tip_hole_pos / 100)) * d.tipSize) / 2;
+      const main = buildParts(ctx).main!;
+      // on the hole axis, behind x = 0, inside the tip unit's x range
+      expect(tiny(main, [tipMinX * 0.5 * (y0 / (d.tipSize / 2)), y0, 0])).toBeLessThan(1e-7);
+    }
   }, 120_000);
 });

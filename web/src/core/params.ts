@@ -184,8 +184,17 @@ export function parseParams(raw: unknown, base: Params = defaultParams()): Param
       };
     });
   }
-  out.dtheta_deg = Math.round(out.dtheta_deg);
-  out.num_cables = Math.round(out.num_cables);
+  // like the desktop tool: int() truncates, and each spin box keeps its own
+  // decimals. Only scale-free fields are rounded: lengths (a, hole sizes,
+  // extrusion, fillers) and stiffness/damping of scaled designs go far below
+  // the desktop ranges and must survive a save/load round trip.
+  out.dtheta_deg = Math.trunc(out.dtheta_deg);
+  out.num_cables = Math.trunc(out.num_cables);
+  const roundTo = (v: number, d: number) => Math.round(v * 10 ** d) / 10 ** d;
+  for (const k of ["b", "theta_max_pi", "p", "elastic_percent", "tip_hole_pos", "base_hole_pos", "cable3_cut_pos", "sim_gravity", "bend_dir_deg"] as const) {
+    out[k] = roundTo(out[k], RANGES[k].decimals);
+  }
+  out.joint_angles = out.joint_angles.map((v) => roundTo(v, RANGES.joint_angle.decimals));
   for (const [k, r] of Object.entries(LIMITS)) {
     if (k in out && typeof (out as unknown as Record<string, unknown>)[k] === "number") {
       const rec = out as unknown as Record<string, number>;

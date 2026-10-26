@@ -106,7 +106,14 @@ export function generateMujocoXml(o: MujocoXmlOptions): string {
         `stiffness="${fmtF(stiffness, 6)}" damping="${fmtF(damping, 6)}"/>`
       );
     }
-    return `<joint type="ball" stiffness="${fmtF(stiffness, 6)}" damping="${fmtF(damping, 6)}"/>`;
+    // ball joints get the same ±Δθ limit as hinges (paper, Note S3): a cone
+    // of half-angle Δθ around the rest orientation
+    if (jointLimitDeg === null) return `<joint type="ball" stiffness="${fmtF(stiffness, 6)}" damping="${fmtF(damping, 6)}"/>`;
+    const cone = (Math.abs(jointLimitDeg) * Math.PI) / 180;
+    return (
+      `<joint type="ball" range="0 ${fmtF(cone, 9)}" ` +
+      `stiffness="${fmtF(stiffness, 6)}" damping="${fmtF(damping, 6)}"/>`
+    );
   };
 
   const buildSites = (scaleFactor: number, linkIndex: number): { xml: string; pos: V3 }[] => {
@@ -171,7 +178,9 @@ export function generateMujocoXml(o: MujocoXmlOptions): string {
   let stiffness = Number(o.jointStiffness ?? 0.04);
   let damping = Number(o.jointDamping ?? 0.02);
 
-  const jointAnglesRad: number[] = (o.jointAngles ?? []).slice(0, numUnits - 1).map((a) => (a * Math.PI) / 180);
+  // The CAD pose (_apply_joint_pose) turns the base side by +angle with the
+  // tip held still, so the child link turns by -angle relative to its parent.
+  const jointAnglesRad: number[] = (o.jointAngles ?? []).slice(0, numUnits - 1).map((a) => (-a * Math.PI) / 180);
   while (jointAnglesRad.length < numUnits - 1) jointAnglesRad.push(0);
 
   let jointAxis: V3;

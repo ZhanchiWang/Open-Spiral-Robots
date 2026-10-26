@@ -119,11 +119,14 @@ export class Recorder {
     const o = this.off(i) + REC_FIELDS;
     return this.buf.subarray(o, o + this.nq);
   }
-  /** index of the last sample with time <= t */
+  /** index of the last sample with time <= t (-1 if none is kept) */
   find(t: number): number {
     let lo = 0;
     let hi = this.count - 1;
     if (hi < 0) return -1;
+    // before the oldest kept sample of a wrapped buffer: overwritten, so not
+    // available (an unwrapped recording starts at the reset, so t = 0 is fine)
+    if (this.count === REC_CAP && t < this.time(0)) return -1;
     while (lo < hi) {
       const mid = (lo + hi + 1) >> 1;
       if (this.time(mid) <= t) lo = mid;
@@ -439,6 +442,7 @@ export class Physics {
     this.mj.mj_forward(this.model, this.data);
     this.rec.reset(this.model.nq);
     this.prevTip = null;
+    this.tipSpeed = 0;
   }
 
   // ---------------------------------------------------------------- grab
@@ -522,10 +526,18 @@ export class Physics {
     const want = Math.max(1, Math.round(simSeconds / ts));
     const t0 = performance.now();
     let done = 0;
+    let diverged = false;
     for (; done < want; done++) {
       this.slew();
       this.applyGrab();
+      const before = d.time;
       mj.mj_step(m, d);
+      // MuJoCo resets the data itself on a bad acceleration (time and ctrl go
+      // back to 0); treat that like a blow-up instead of carrying on limp
+      if (d.time < before) {
+        diverged = true;
+        break;
+      }
       this.sample();
       if ((done & 15) === 15 && performance.now() - t0 > budgetMs) {
         done++;
@@ -535,9 +547,12 @@ export class Physics {
     const spent = performance.now() - t0;
     this.stepCostUs = (spent * 1000) / Math.max(1, done);
     const qpos = d.qpos as Float64Array;
-    if (!Number.isFinite(qpos[0])) {
+    if (diverged || !Number.isFinite(qpos[0])) {
+      // release the cables so the reset pose is stable, then start over
+      this.target = this.target.map(() => 0);
+      this.activation = this.activation.map(() => 0);
       this.resetPose();
-      throw new Error("Simulation diverged and was reset");
+      throw new Error("Simulation diverged and was reset (cables released)");
     }
     return done * ts;
   }

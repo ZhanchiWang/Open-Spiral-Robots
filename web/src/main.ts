@@ -290,6 +290,7 @@ const trailChk = checkbox(t("trail"), true, (v) => {
 const slowSel = el("select", { "aria-label": t("slowFactor") });
 for (const f of [1, 4, 10, 30, 100]) slowSel.append(el("option", { value: f, selected: f === 10 }, `1/${f}×`));
 const strikeBtn = button("", () => void strike(), "btn-show strike");
+const measureBtn = button(t("measureHere"), () => void strike(), "btn-show");
 strikeBtn.append(icon("bolt", 18), el("span", {}, t("strike")), el("kbd", {}, "Space"));
 addEventListener("keydown", (e: KeyboardEvent) => {
   const tag = (e.target as HTMLElement).tagName;
@@ -304,11 +305,23 @@ const speedDock = el(
   el("div", { class: "dock-col" }, strikeBtn, el("div", { class: "row-split" }, el("span", { class: "muted" }, t("force")), force), el("p", { class: "hint" }, t("strikeHint"))),
   el("div", { class: "dock-col grow" }, results, el("div", { class: "row-split" }, ghostChk, trailChk), el("div", { class: "row-split" }, iconLabel(button(t("slowmo"), () => void replayStrike(), "btn-show"), "replay"), slowSel)),
 );
-let lastStrike: { tEnd: number; series: Awaited<ReturnType<PhysicsClient["series"]>>; t90: number; vmax: number; peak: number; L: number } | null = null;
+let lastStrike: {
+  tEnd: number;
+  series: Awaited<ReturnType<PhysicsClient["series"]>>;
+  t90: number;
+  vmax: number;
+  peak: number;
+  L: number;
+  /** poses kept for the slow-motion replay (the worker's recording rolls over) */
+  frames: { times: number[]; poses: Float32Array[]; bends: Float32Array[] };
+} | null = null;
+let measuring = false;
+const REPLAY_FRAMES = 240;
 
 async function strike(): Promise<void> {
   const meta = phys.meta;
-  if (!meta) return;
+  if (!meta || measuring) return;
+  measuring = true;
   stopAuto();
   stopReplay();
   stage.setGhosts([]);
@@ -320,9 +333,13 @@ async function strike(): Promise<void> {
   timelineW.clear();
   peakSpeed = 0;
   strikeBtn.disabled = true;
+  measureBtn.disabled = true;
   results.replaceChildren(el("span", { class: "muted" }, t("measuring")));
-  // the curl time scales with length: ~0.6 s for the 46 cm default
-  const horizon = 0.9 * (meta.lengthM / 0.464) + 0.05;
+  // the curl scales with length: for the 46 cm default a full-force strike
+  // peaks by ~0.18 s, a weak one (force 0.2) creeps up to 99 % by ~0.8 s;
+  // measure over a window that scales the same way
+  const a = Number(force.value);
+  const horizon = (0.6 + 0.75 * (1 - a)) * (meta.lengthM / 0.464) + 0.002;
   const t0 = performance.now();
   await new Promise<void>((res) => {
     const check = () => {
@@ -333,23 +350,37 @@ async function strike(): Promise<void> {
     check();
   });
   const series = await phys.series(0, horizon, 400);
+  const frameTimes = Array.from({ length: REPLAY_FRAMES }, (_, i) => (i / (REPLAY_FRAMES - 1)) * horizon);
+  const frames = await phys.poses(frameTimes);
+  strikeBtn.disabled = false;
+  measureBtn.disabled = false;
+  measuring = false;
+  // the model was rebuilt mid-measurement (size or shape changed): the
+  // recording restarted, so this result would be meaningless
+  if (phys.meta !== meta) {
+    renderResults();
+    return;
+  }
   let peak = 0;
   let vmax = 0;
   for (let i = 0; i < series.t.length; i++) {
     peak = Math.max(peak, Math.abs(series.curl[i]));
     vmax = Math.max(vmax, series.speed[i]);
   }
+  // first crossing of 90% of the peak, interpolated between samples
   let t90 = NaN;
   for (let i = 0; i < series.t.length; i++) {
-    if (Math.abs(series.curl[i]) >= 0.9 * peak) {
-      t90 = series.t[i];
+    const c = Math.abs(series.curl[i]);
+    if (c >= 0.9 * peak) {
+      const c0 = i > 0 ? Math.abs(series.curl[i - 1]) : c;
+      const t0 = i > 0 ? series.t[i - 1] : series.t[i];
+      t90 = c > c0 ? t0 + ((0.9 * peak - c0) / (c - c0)) * (series.t[i] - t0) : series.t[i];
       break;
     }
   }
-  lastStrike = { tEnd: horizon, series, t90, vmax, peak, L: meta.lengthM * 1000 };
+  lastStrike = { tEnd: horizon, series, t90, vmax, peak, L: meta.lengthM * 1000, frames: { times: frameTimes, ...frames } };
   ui.measures = ui.measures.filter((m) => Math.abs(Math.log(m.L / lastStrike!.L)) > 0.02);
   ui.measures.push({ L: lastStrike.L, t90, vmax });
-  strikeBtn.disabled = false;
   renderResults();
   showStrikeArtifacts();
   drawLaw();
@@ -394,20 +425,16 @@ async function replayStrike() {
   const slow = Number(slowSel.value);
   const dur = s.tEnd * slow;
   const start = performance.now();
-  let busyReq = false;
-  const loop = async () => {
+  const f = s.frames;
+  const loop = () => {
     const tt = Math.min(s.tEnd, ((performance.now() - start) / 1000 / dur) * s.tEnd);
-    if (!busyReq) {
-      busyReq = true;
-      const { poses, bends } = await phys.poses([tt]);
-      busyReq = false;
-      if (poses[0]) stage.applyPoses(poses[0], bends[0]);
-      ui.replayT = tt;
-      timelineW.draw(tt);
-    }
-    if (tt < s.tEnd) replayRaf = requestAnimationFrame(() => void loop());
+    const k = Math.min(f.poses.length - 1, Math.round((tt / s.tEnd) * (f.times.length - 1)));
+    if (f.poses[k]) stage.applyPoses(f.poses[k], f.bends[k]);
+    ui.replayT = tt;
+    timelineW.draw(tt);
+    if (tt < s.tEnd) replayRaf = requestAnimationFrame(loop);
   };
-  void loop();
+  loop();
 }
 
 // ---------------------------------------------------------------- dock: scale
@@ -431,7 +458,7 @@ const scaleDock = el(
   "section",
   { class: "cpanel mode-col", "data-mode": "scale" },
   el("div", { class: "dock-col grow" }, el("h3", {}, t("scaleTitle")), bigLen, scaleSlider.root, el("p", { class: "hint" }, t("scaleHint")), el("div", { class: "row-split" }, el("span", { class: "muted" }, t("refs")), refChips)),
-  el("div", { class: "dock-col" }, scaleStats, el("h3", {}, `${t("law")} · ${t("lawText")}`), lawCanvas, button(t("measureHere"), () => void strike(), "btn-show")),
+  el("div", { class: "dock-col" }, scaleStats, el("h3", {}, `${t("law")} · ${t("lawText")}`), lawCanvas, measureBtn),
 );
 
 function applyRefs() {

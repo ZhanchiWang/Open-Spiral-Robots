@@ -56,6 +56,15 @@ function transfer(m: MeshData | null, list: Transferable[]) {
   if (m.edges) list.push(m.edges.buffer);
 }
 
+/** replicad shapes live in the wasm heap and are not garbage-collected. */
+function free(s: { delete(): void } | null | undefined) {
+  try {
+    s?.delete();
+  } catch {
+    /* already freed */
+  }
+}
+
 function getParts(params: Params, log: (s: string) => void, timings: Record<string, number>): CadParts {
   const key = JSON.stringify(params);
   if (cache?.key === key) {
@@ -65,6 +74,10 @@ function getParts(params: Params, log: (s: string) => void, timings: Record<stri
   const t0 = performance.now();
   const parts = buildParts(makeContext(params, log));
   timings.solids = performance.now() - t0;
+  if (cache) {
+    free(cache.parts.main);
+    free(cache.parts.elastic);
+  }
   cache = { key, parts };
   return parts;
 }
@@ -96,10 +109,18 @@ self.onmessage = async (ev: MessageEvent<CadRequest>) => {
         coneRegions: [] as (MeshData | null)[],
         posed: parts.posed,
       };
-      if (!parts.posed && req.options?.holes) result.holes = meshOf(holePreview(ctx), tol, false);
+      if (!parts.posed && req.options?.holes) {
+        const h = holePreview(ctx);
+        result.holes = meshOf(h, tol, false);
+        free(h);
+      }
       if (req.params.show_cone_cuts && req.params.two_cable) {
         const t2 = performance.now();
-        result.coneRegions = coneCutRegions(ctx).map((s) => meshOf(s, tol, false));
+        result.coneRegions = coneCutRegions(ctx).map((s) => {
+          const m = meshOf(s, tol, false);
+          free(s);
+          return m;
+        });
         timings.coneRegions = performance.now() - t2;
       }
       timings.mesh = performance.now() - t1;
@@ -123,6 +144,7 @@ self.onmessage = async (ev: MessageEvent<CadRequest>) => {
         // makeCompound frees its inputs: hand it clones so the cache stays valid
         const comp = makeCompound(solids.map((s) => s.clone())) as Shape3D;
         bytes = new Uint8Array(await comp.blobSTEP().arrayBuffer());
+        free(comp);
       } else {
         const t = stlTolerance(ctx.design);
         bytes = meshToBinarySTL(solids.map((s) => s.mesh({ tolerance: t, angularTolerance: 0.1 })));
@@ -139,6 +161,7 @@ self.onmessage = async (ev: MessageEvent<CadRequest>) => {
       timings.solids = performance.now() - t1;
       const t2 = performance.now();
       const bytes = meshToBinarySTL([solid.mesh({ tolerance: stlTolerance(ctx.design), angularTolerance: 0.1 })]);
+      free(solid);
       timings.export = performance.now() - t2;
       reply({ bytes }, [bytes.buffer]);
       return;

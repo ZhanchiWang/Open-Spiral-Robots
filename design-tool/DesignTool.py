@@ -2161,7 +2161,17 @@ class MainWindow(QMainWindow):
         base_size = float(self.base_hole_size_spin.value()) if hasattr(self, "base_hole_size_spin") else self.params.base_hole_size
         y0 = max(0.0, min(1.0, tip_pos)) * (self._tip_size * 0.5)
         y1 = max(0.0, min(1.0, base_pos)) * (self._base_size * 0.5)
-        p0 = (0.0, y0, 0.0)
+        tip_r = tip_size * 0.5
+        base_r = base_size * 0.5
+        # For small dtheta the tip unit reaches behind x = 0 (its angle at q0 is
+        # over 90 deg): start the cutter there, on the same line and taper, so
+        # the hole stays open at the tip.
+        tip_min_x = min([0.0] + [q[0] for q in (self._polys_primary[0] if self._polys_primary else [])])
+        ext = (-tip_min_x + max(tip_size, 0.1)) if tip_min_x < 0 else 0.0
+        if ext > 0 and self._robot_length > 1e-9:
+            y0 -= (y1 - y0) * ext / self._robot_length
+            tip_r = max(1e-3, tip_r - (base_r - tip_r) * ext / self._robot_length)
+        p0 = (-ext, y0, 0.0)
         p1 = (self._robot_length, y1, 0.0)
         dx = p1[0] - p0[0]
         dy = p1[1] - p0[1]
@@ -2182,8 +2192,8 @@ class MainWindow(QMainWindow):
                 pts = [(t, t), (0.0, -r), (-t, t), (0.0, apex)]
                 return [(y * c_r + z * s_r, -y * s_r + z * c_r) for (y, z) in pts]
 
-            q0 = td_pts(max(0.05, tip_size * 0.5))
-            q1 = td_pts(max(0.05, base_size * 0.5))
+            q0 = td_pts(max(0.05, tip_r))
+            q1 = td_pts(max(0.05, base_r))
             frustum = (
                 cq.Workplane("YZ")
                 .moveTo(*q0[0])
@@ -2199,7 +2209,7 @@ class MainWindow(QMainWindow):
             )
         else:
             # Build frustum around +X axis in XY plane, then revolve around X
-            profile = [(0.0, 0.0), (length_axis, 0.0), (length_axis, base_size * 0.5), (0.0, tip_size * 0.5)]
+            profile = [(0.0, 0.0), (length_axis, 0.0), (length_axis, base_r), (0.0, tip_r)]
             frustum = (
                 cq.Workplane("XY")
                 .polyline(profile)
@@ -2477,12 +2487,14 @@ class MainWindow(QMainWindow):
 
         cutter0 = plane_box.intersect(slab)
 
-        shapes = []
+        # With 5+ cables neighbouring flats overlap, and OCCT's cut with a
+        # compound of overlapping tools leaves fragments: fuse them first.
+        tool = None
         for k in range(n):
             phi = (k + 0.5) * 360.0 / n  # flats sit between adjacent cable holes
-            inst = cutter0.rotate((0, 0, 0), (1, 0, 0), phi)
-            shapes.append(inst.val())
-        return cq.Workplane("XY").newObject([cq.Compound.makeCompound(shapes)])
+            inst = cutter0.rotate((0, 0, 0), (1, 0, 0), phi).val()
+            tool = inst if tool is None else tool.fuse(inst)
+        return cq.Workplane("XY").newObject([tool])
 
     def _export_stl_single_threaded(self, shape, path: str, tolerance: float) -> bool:
         """Export a CadQuery Shape/Workplane to binary STL, meshing single-threaded.

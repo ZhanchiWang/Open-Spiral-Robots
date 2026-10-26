@@ -53,13 +53,21 @@ export function resolve(input: Params): Resolved {
 }
 
 export function resolveTendons(cfgs: TendonConfig[] | undefined, nTendons: number, nJoints: number): TendonConfig[] {
+  // a cable added later takes the gear of the existing ones: after a size
+  // change that gear has been scaled (∝ s²), the default only fits 464 mm
+  const inherit = cfgs?.find((c) => Number.isFinite(c?.gear) && c.gear >= 0)?.gear ?? DEFAULT_TENDON.gear;
   return Array.from({ length: nTendons }, (_, k) => {
     const c = cfgs?.[k];
     const joint = c && Number.isFinite(c.joint) && c.joint >= 1 && c.joint < nJoints ? Math.round(c.joint) : nJoints;
+    let lo = c ? clamp(c.ctrl_lo, -100, 0) : DEFAULT_TENDON.ctrl_lo;
+    let hi = c ? clamp(c.ctrl_hi, 0, 100) : DEFAULT_TENDON.ctrl_hi;
+    // MuJoCo rejects an empty control range ("0 0")
+    if (!(hi > lo)) [lo, hi] = [DEFAULT_TENDON.ctrl_lo, DEFAULT_TENDON.ctrl_hi];
     return {
-      gear: c ? c.gear : DEFAULT_TENDON.gear,
-      ctrl_lo: c ? clamp(c.ctrl_lo, -100, 0) : DEFAULT_TENDON.ctrl_lo,
-      ctrl_hi: c ? clamp(c.ctrl_hi, 0, 100) : DEFAULT_TENDON.ctrl_hi,
+      // a negative gear would flip the actuator
+      gear: c && Number.isFinite(c.gear) ? Math.max(0, c.gear) : inherit,
+      ctrl_lo: lo,
+      ctrl_hi: hi,
       joint,
     };
   });

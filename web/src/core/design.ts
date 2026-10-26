@@ -389,6 +389,15 @@ export function checkDesign(params: Params, design: Design | null): Issue[] {
       issues.push({ level: "warn", message: `Extrusion ${params.extrusion.toFixed(2)} mm is outside ${lo.toFixed(2)}–${hi.toFixed(2)} mm.` });
     }
   }
+  if (params.elastic_enabled && !design.elastic) {
+    issues.push({
+      level: "warn",
+      message: `Elastic layer ${params.elastic_percent.toFixed(0)}% is too wide for this outline and is left out: lower Elastic % (or raise p).`,
+    });
+  }
+  if (params.p <= 1e-6) {
+    issues.push({ level: "error", message: "p = 0 gives a zero-width tip and base: increase p." });
+  }
   if (design.units > 60) {
     issues.push({ level: "warn", message: `${design.units} units: CAD booleans will be slow. Increase Δθ or reduce θ max.` });
   }

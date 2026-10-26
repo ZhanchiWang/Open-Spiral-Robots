@@ -1,7 +1,7 @@
 """Volumes of the desktop tool's CadQuery solids, for tests/cad.test.ts.
 
 Runs the real _build_cad_parts (and the methods it calls) from
-design-tool/DesignTool.py on a stub `self`; needs cadquery==2.6.1:
+design-tool/DesignTool.py on a stub `self`; needs cadquery (generated with 2.8.0; 2.6.1 gives the same volumes):
 
     python web/tests/fixtures/gen_cad_fixtures.py > web/tests/fixtures/cad_python.json
 """
@@ -123,6 +123,10 @@ cases = {
     "4cable_teardrop": {"two_cable": False, "spins": {"theta_max_spin": 4.0, "cable_count_spin": 4, "teardrop_check": True}},
     "2cable_posed": {"spins": {"theta_max_spin": 3.6}, "angles": lambda i: 8.0 if i % 2 else 12.0},
     "3cable_posed": {"two_cable": False, "spins": {"theta_max_spin": 3.6, "bend_dir_spin": 30.0}, "angles": lambda i: 8.0 if i % 2 else 12.0},
+    # 5+ cables: overlapping flat cuts; dtheta 15: the tip unit reaches x < 0
+    "6cable": {"two_cable": False, "spins": {"theta_max_spin": 4.0, "cable_count_spin": 6}},
+    "2cable_dtheta15": {"spins": {"theta_max_spin": 4.0, "dtheta_spin": 15}},
+    "3cable_dtheta15": {"two_cable": False, "spins": {"theta_max_spin": 4.0, "dtheta_spin": 15}},
 }
 out = {}
 for name, cfg in cases.items():
