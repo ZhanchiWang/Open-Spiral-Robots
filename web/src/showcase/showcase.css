@@ -173,6 +173,10 @@ kbd {
 .chip.on { background: var(--lift); color: var(--ink); border-color: var(--hair-2); }
 .console .chip { height: 26px; padding: 0 10px; gap: 5px; font-size: 11px; }
 .console .chip.small { height: 22px; padding: 0 8px; font-size: 10.5px; }
+.lang-chip .chip-label { display: inline-flex; gap: 4px; }
+.lang-chip .chip-label span { color: var(--muted); }
+.lang-chip .chip-label span.on { color: var(--ink); }
+.lang-chip .chip-label .lang-sep { opacity: .5; }
 .live-chip .ico { color: var(--muted); }
 .live-chip.on .ico { color: var(--signal); animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .35; } }

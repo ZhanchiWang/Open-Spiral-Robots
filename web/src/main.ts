@@ -86,10 +86,20 @@ const iconBtn = (name: Parameters<typeof icon>[0], label: string, onClick: () =>
   b.append(icon(name), el("span", { class: "chip-label" }, label));
   return b;
 };
-const langBtn = iconBtn("globe", getLang() === "zh" ? "EN" : "中文", () => {
+// shows both languages with the current one lit, so the label never reads as
+// the page's language when it is the other option
+const langBtn = iconBtn("globe", getLang() === "zh" ? "Switch to English" : "切换到中文", () => {
   setLang(getLang() === "zh" ? "en" : "zh");
   location.reload();
 });
+langBtn.classList.add("lang-chip");
+langBtn
+  .querySelector(".chip-label")!
+  .replaceChildren(
+    el("span", { class: getLang() === "en" ? "on" : "" }, "EN"),
+    el("span", { class: "lang-sep" }, "/"),
+    el("span", { class: getLang() === "zh" ? "on" : "" }, "中文"),
+  );
 const topbar = el(
   "header",
   { class: "topbar-show" },

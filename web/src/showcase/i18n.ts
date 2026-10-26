@@ -179,22 +179,38 @@ const en: Record<Key, string> = {
   low: "Low",
 };
 
-let lang: "zh" | "en" = (() => {
+type Lang = "zh" | "en";
+const LANG_KEY = "openspirobs.lang.v2";
+
+/** The visitor's first preferred browser language, reduced to zh / en. */
+function browserLang(): { lang: Lang; tag: string } {
+  const tag = (navigator.languages?.[0] ?? navigator.language ?? "en").toLowerCase();
+  return { lang: tag.startsWith("zh") ? "zh" : "en", tag };
+}
+
+// Follow the browser. The top-bar switch saves an override together with the
+// browser language it was made under, so changing the browser language later
+// takes effect again; picking the browser's own language clears the override.
+let lang: Lang = (() => {
+  const b = browserLang();
   try {
-    const s = localStorage.getItem("openspirobs.lang");
-    if (s === "zh" || s === "en") return s;
+    const saved = JSON.parse(localStorage.getItem(LANG_KEY) ?? "null") as { lang?: string; tag?: string } | null;
+    if (saved && (saved.lang === "zh" || saved.lang === "en") && saved.tag === b.tag) return saved.lang;
   } catch {
-    /* default below */
+    /* fall back to the browser */
   }
-  return navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
+  return b.lang;
 })();
 
 export const t = (k: Key): string => (lang === "zh" ? zh[k] : en[k]);
 export const getLang = () => lang;
-export function setLang(l: "zh" | "en"): void {
+export function setLang(l: Lang): void {
   lang = l;
+  const b = browserLang();
   try {
-    localStorage.setItem("openspirobs.lang", l);
+    localStorage.removeItem("openspirobs.lang"); // pre-v2 key: a plain choice that never expired
+    if (l === b.lang) localStorage.removeItem(LANG_KEY);
+    else localStorage.setItem(LANG_KEY, JSON.stringify({ lang: l, tag: b.tag }));
   } catch {
     /* ignore */
   }
