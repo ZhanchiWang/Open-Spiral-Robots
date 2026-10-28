@@ -1,5 +1,6 @@
 // CAD smoke test on the real OpenCascade build (slow: loads a 23 MB wasm).
-import { beforeAll, describe, expect, it } from "vitest";
+import { setImmediate } from "node:timers/promises";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import opencascade from "replicad-opencascadejs";
 import { makeBox, makeCompound, measureVolume, setOC, type Shape3D } from "replicad";
 import { baselinkSolid, buildParts, coneCutRegions, makeContext } from "../src/cad/cad";
@@ -27,6 +28,12 @@ function ctxFor(over: Partial<Params>) {
 beforeAll(async () => {
   setOC((await opencascade()) as never);
 }, 60_000);
+
+// OpenCascade runs synchronously. Yield between cases so Vitest can process
+// worker RPC replies instead of timing out after a long run of CAD operations.
+afterEach(async () => {
+  await setImmediate();
+});
 
 const v = (s: Shape3D | null) => (s ? measureVolume(s) : 0);
 const rel = (a: number, b: number) => Math.abs(a - b) / Math.max(1e-9, Math.abs(b));
