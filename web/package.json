@@ -1,0 +1,58 @@
+{
+  "name": "open-spirobs-web",
+  "version": "0.1.0",
+  "description": "Browser version of the OpenSpiRobs design tool: logarithmic-spiral robot design, CAD export (STEP/STL), MuJoCo XML export and in-browser MuJoCo debugging.",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "bin": {
+    "openspirobs-web": "bin/serve.mjs"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "serve": "node bin/serve.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZhanchiWang/Open-Spiral-Robots.git",
+    "directory": "web"
+  },
+  "homepage": "https://zhanchiwang.github.io/Open-Spiral-Robots/",
+  "keywords": [
+    "spirob",
+    "soft-robot",
+    "logarithmic-spiral",
+    "mujoco",
+    "cad",
+    "step",
+    "opencascade",
+    "robotics"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@fontsource/instrument-serif": "5.3.0",
+    "@mujoco/mujoco": "3.15.0",
+    "@types/node": "22.20.5",
+    "@types/three": "0.180.0",
+    "replicad": "1.1.0",
+    "replicad-opencascadejs": "1.1.0",
+    "three": "0.180.0",
+    "typescript": "5.9.2",
+    "vite": "7.1.5",
+    "vitest": "3.2.4"
+  }
+}

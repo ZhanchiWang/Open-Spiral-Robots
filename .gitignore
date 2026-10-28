@@ -2,3 +2,7 @@
 local/
 extensions/multi-robot-array/output/
 __pycache__/
+
+# macOS Finder metadata
+.DS_Store
+._*

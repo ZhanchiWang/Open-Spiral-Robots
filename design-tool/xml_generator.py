@@ -83,7 +83,15 @@ def generate_mujoco_xml(
                 f'<joint type="hinge" axis="1 0 0" range="{-limit_rad:.9f} {limit_rad:.9f}" '
                 f'stiffness="{stiffness:.6f}" damping="{damping:.6f}"/>'
             )
-        return f'<joint type="ball" stiffness="{stiffness:.6f}" damping="{damping:.6f}"/>'
+        # ball joints get the same ±Δθ limit as hinges (paper, Note S3): a
+        # cone of half-angle Δθ around the rest orientation
+        if joint_limit_deg is None:
+            return f'<joint type="ball" stiffness="{stiffness:.6f}" damping="{damping:.6f}"/>'
+        cone_rad = math.radians(abs(joint_limit_deg))
+        return (
+            f'<joint type="ball" range="0 {cone_rad:.9f}" '
+            f'stiffness="{stiffness:.6f}" damping="{damping:.6f}"/>'
+        )
 
     def build_sites(scale_factor: float, link_index: int) -> list[str]:
         if site_points is None or robot_length is None:
@@ -146,7 +154,10 @@ def generate_mujoco_xml(
     # Angles arrive in base-to-tip order: J1 = base joint, J(N-1) = tip joint.
     joint_angles_rad: list[float] = []
     if joint_angles is not None:
-        joint_angles_rad = [math.radians(a) for a in joint_angles[:num_units - 1]]
+        # The CAD pose (_apply_joint_pose) turns the base side by +angle with
+        # the tip held still, so the child link turns by -angle relative to
+        # its parent; the same sign keeps the XML pose equal to the CAD/STL.
+        joint_angles_rad = [-math.radians(a) for a in joint_angles[:num_units - 1]]
     # Pad to num_units-1 with zeros
     while len(joint_angles_rad) < num_units - 1:
         joint_angles_rad.append(0.0)
